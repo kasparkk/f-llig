@@ -5,7 +5,7 @@
 // bekommt ein installiertes Handy nie wieder ein Update zu sehen: die alte
 // index.html liegt im Speicher, das Netz wird nie gefragt, und aufgeraeumt wird
 // erst, wenn sich diese Datei hier aendert. Genau das ist einmal passiert.
-var CACHE = "faellig-v4";
+var CACHE = "faellig-v5";
 var ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", function (ev) {

@@ -700,6 +700,19 @@
   .add__submit:disabled { opacity: 0.4; cursor: not-allowed; }
   .add__submit:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
+  /* Hinweis, wenn etwas ueber "Teilen" aus einer anderen App kam */
+  .geteilt {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+    margin: 0 0 10px; padding: 8px 11px; border-radius: 8px;
+    background: var(--accent-soft); color: var(--ink); font-size: 0.85rem;
+  }
+  .geteilt[hidden] { display: none; }
+  .geteilt__text { flex: 1 1 auto; }
+  .geteilt__btn {
+    border: 1px solid var(--accent); background: transparent; color: var(--accent);
+    border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+  }
+
   /* Live-Vorschau: zeigt, was die App verstanden hat */
   .preview {
     display: flex;
@@ -1361,6 +1374,10 @@
   </div>
 
   <section class="add">
+    <div class="geteilt" id="geteilt" hidden role="status">
+      <span class="geteilt__text" id="geteiltText">Aus einer anderen App geteilt</span>
+      <button class="geteilt__btn" id="geteiltNotiz" type="button">Lieber als Notiz</button>
+    </div>
     <form class="add__field" id="addForm">
       <input
         class="add__input"
@@ -1615,7 +1632,7 @@
 
   // Wird bei jeder Veroeffentlichung hochgezaehlt. Steht unten in der
   // Fusszeile, damit man eine haengengebliebene alte Fassung sofort erkennt.
-  var FASSUNG = "13.9.2026";
+  var FASSUNG = "25.11.2026";
 
   var STORAGE_KEY = "faellig-aufgaben-v1";
   var SETTINGS_KEY = "faellig-einstellungen-v1";
@@ -5269,6 +5286,72 @@
 
   var fassungEl = document.getElementById("fassung");
   if (fassungEl) fassungEl.textContent = "Fassung " + FASSUNG;
+
+  /* ============ Teilen aus anderen Apps + Schnellstart-Kuerzel ============ */
+  // Android: Teilen -> faellig ruft ./?teilen=1&title=..&text=..&url=.. auf (manifest share_target).
+  // Kuerzel vom Startbildschirm: ./?neu=frist|todo|notiz (manifest shortcuts).
+  (function () {
+    var q;
+    try { q = new URLSearchParams(window.location.search); } catch (e) { return; }
+    var neu = q.get("neu");
+    var istTeilen = q.has("teilen");
+    if (!istTeilen && !neu) return;
+    // Adresse sofort saeubern, damit Neuladen nichts doppelt anlegt.
+    try { history.replaceState(null, "", window.location.pathname); } catch (e) {}
+
+    var banner = document.getElementById("geteilt");
+    var bannerText = document.getElementById("geteiltText");
+    var alsNotizBtn = document.getElementById("geteiltNotiz");
+
+    function neueNotiz(text) {
+      var id = "n" + Date.now() + Math.random().toString(36).slice(2, 5);
+      notes.unshift({ id: id, text: text, createdAt: Date.now() });
+      saveNotes();
+      renderNotes();
+      showTab("notizen");
+      var el = noteListEl.querySelector('[data-noteinput="' + id + '"]');
+      if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {} }
+      return id;
+    }
+
+    if (!istTeilen) {
+      if (neu === "notiz") { neueNotiz(""); return; }
+      showTab(neu === "todo" ? "todos" : "fristen");
+      setTimeout(function () { addInput.focus(); }, 50);
+      return;
+    }
+
+    var titel = (q.get("title") || "").trim();
+    var text = (q.get("text") || "").trim();
+    var link = (q.get("url") || "").trim();
+    // Viele Apps stecken den Link in "text"; dann nicht doppelt anhaengen.
+    var teile = [];
+    if (titel && text.indexOf(titel) === -1) teile.push(titel);
+    if (text) teile.push(text);
+    if (link && text.indexOf(link) === -1) teile.push(link);
+    var alles = teile.join("\n").trim();
+    if (!alles) return;
+
+    var kurz = alles.length <= 140 && alles.indexOf("\n") === -1;
+    if (!kurz) {
+      neueNotiz(alles);
+      return;
+    }
+    // Kurz: in die Eingabe legen, damit Datum/Kategorie erkannt werden. Ein Tipp auf "Merken" speichert.
+    showTab("fristen");
+    addInput.value = alles;
+    refreshPreview();
+    banner.hidden = false;
+    alsNotizBtn.addEventListener("click", function () {
+      var t = addInput.value.trim() || alles;
+      addInput.value = "";
+      refreshPreview();
+      banner.hidden = true;
+      neueNotiz(t);
+    });
+    addForm.addEventListener("submit", function () { banner.hidden = true; });
+    setTimeout(function () { addInput.focus(); }, 50);
+  })();
 
   refreshPreview();
   render();
