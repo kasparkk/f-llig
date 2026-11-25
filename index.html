@@ -32,6 +32,7 @@
     --accent-soft: #dcecea;
     --marker: #ffd60a;
     --vertrag: #6b3fa0;
+    --gcal: #2b63c2;
     --over: #c62f2f;
     --today: #b45c00;
     --done: #3f8a58;
@@ -54,6 +55,7 @@
       --accent-soft: #1e3b38;
       --marker: #ffd60a;
       --vertrag: #b99bf0;
+    --gcal: #8ab4ff;
       --over: #ff7070;
       --today: #ffb454;
       --done: #63b37f;
@@ -76,6 +78,7 @@
     --accent-soft: #1e3b38;
     --marker: #ffd60a;
     --vertrag: #b99bf0;
+    --gcal: #8ab4ff;
     --over: #ff7070;
     --today: #ffb454;
     --done: #63b37f;
@@ -975,6 +978,22 @@
 
   .task__vertragsinfo { color: var(--ink-faint); }
 
+  /* Termin aus dem Google-Kalender: nur zum Sehen, nicht abhakbar */
+  .task--google { border-style: dotted; background: transparent; }
+  .task__gcal {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    margin-top: 1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--gcal);
+    font-size: 0.9rem;
+  }
+  .task__badge--google { color: var(--gcal); }
+  .task__zeit { font-weight: 600; color: var(--gcal); font-variant-numeric: tabular-nums; }
+
   /* ---------- "Was jetzt?" ---------- */
 
   .jetzt {
@@ -1737,6 +1756,42 @@
     </div>
   </details>
 
+  <details class="backup" id="gTermine">
+    <summary>Google-Termine in Fällig</summary>
+    <div class="backup__body">
+      <div class="backup__block">
+        <span class="backup__title">Termine aus deinem Google-Kalender anzeigen</span>
+        <span class="backup__hint" id="gTerminAus">
+          Fällig zeigt deine Google-Termine der nächsten zwei Wochen zwischen den Fristen an, nur zum Sehen.
+          Braucht die Anmeldung unter &bdquo;Ger&auml;te abgleichen&ldquo;.
+        </span>
+        <div id="gTerminStart" hidden>
+          <span class="backup__hint">
+            Am Laptop in Google Kalender: Zahnrad &rarr; Einstellungen &rarr; links deinen Kalender w&auml;hlen
+            &rarr; ganz unten &bdquo;Privatadresse im iCal-Format&ldquo; kopieren und hier einf&uuml;gen.
+            Die Adresse kommt per Sync auf deine anderen Ger&auml;te.
+          </span>
+          <input class="backup__link" id="gTerminUrl" type="url" autocomplete="off" spellcheck="false"
+            placeholder="https://calendar.google.com/calendar/ical/…/private-…/basic.ics" aria-label="Geheime iCal-Adresse" />
+          <div class="backup__row">
+            <button class="btn btn--primary" id="gTerminAn" type="button">Verbinden</button>
+          </div>
+        </div>
+        <div id="gTerminDa" hidden>
+          <div class="backup__row">
+            <button class="btn" id="gTerminJetzt" type="button">Jetzt neu holen</button>
+            <button class="btn" id="gTerminTrennen" type="button">Trennen</button>
+          </div>
+          <span class="backup__hint">
+            Fällig holt die Termine beim Öffnen und alle 15 Minuten neu. Wer die geheime Adresse hat,
+            sieht deinen Kalender. Ist sie in falsche H&auml;nde geraten, setz sie in Google zur&uuml;ck und f&uuml;g die neue hier ein.
+          </span>
+        </div>
+        <span class="backup__msg" id="gTerminMsg"></span>
+      </div>
+    </div>
+  </details>
+
   <p class="foot">
     <span id="fussText">Alles bleibt in diesem Browser gespeichert — nichts wird hochgeladen.</span>
     Lege dir den Link auf den Startbildschirm, dann ist alles immer griffbereit.
@@ -1750,7 +1805,7 @@
 
   // Wird bei jeder Veroeffentlichung hochgezaehlt. Steht unten in der
   // Fusszeile, damit man eine haengengebliebene alte Fassung sofort erkennt.
-  var FASSUNG = "25.11.2026 Kalender-Abo";
+  var FASSUNG = "25.11.2026 Google-Termine";
 
   var STORAGE_KEY = "faellig-aufgaben-v1";
   var SETTINGS_KEY = "faellig-einstellungen-v1";
@@ -2678,7 +2733,11 @@
         abos.length === 1 ? "1 Posten" : abos.length + " Posten";
     }
 
-    if (zeilen.length === 0) {
+    // Google-Termine stehen nur zum Sehen dazwischen: zaehlen nicht oben mit
+    // und sind nie "Was jetzt?".
+    var gZeilen = googleZeilen();
+
+    if (zeilen.length === 0 && gZeilen.length === 0) {
       listEl.innerHTML =
         '<div class="empty">' +
           '<div class="empty__big">' + (items.length ? "Alles erledigt." : "Noch nichts eingetragen.") + "</div>" +
@@ -2690,7 +2749,7 @@
         "</div>";
     } else {
       var byBucket = {};
-      zeilen.forEach(function (r) {
+      zeilen.concat(gZeilen).forEach(function (r) {
         var b = bucketOf(r);
         (byBucket[b] = byBucket[b] || []).push(r);
       });
@@ -2701,14 +2760,19 @@
         if (!group || !group.length) return;
         group.sort(function (x, y) {
           if (x.dueKey && y.dueKey && x.dueKey !== y.dueKey) return x.dueKey < y.dueKey ? -1 : 1;
+          // am selben Tag: Kalendertermine zuerst, nach Uhrzeit (ganztaegig vorn)
+          var xg = x.kind === "google", yg = y.kind === "google";
+          if (xg !== yg) return xg ? -1 : 1;
+          if (xg) return x.startMs - y.startMs;
           if (x.isFixed !== y.isFixed) return x.isFixed ? -1 : 1;
           return x.createdAt - y.createdAt;
         });
+        var anzahl = group.filter(function (r) { return r.kind !== "google"; }).length;
         html += '<div class="group">' +
           '<div class="group__head" data-tone="' + b.tone + '">' + b.title +
-          ' <span class="group__count">' + group.length + "</span></div>" +
+          (anzahl ? ' <span class="group__count">' + anzahl + "</span>" : "") + "</div>" +
           group.map(function (r) {
-            return r.kind === "kuend" ? renderKuendZeile(r) : renderTask(r.item);
+            return r.kind === "kuend" ? renderKuendZeile(r) : r.kind === "google" ? renderGoogleZeile(r) : renderTask(r.item);
           }).join("") +
           "</div>";
       });
@@ -6090,7 +6154,7 @@
         syncLauf = null;
         syncAnzeigen();
         if (syncNochmal) { syncNochmal = false; syncBald(300); }
-        else if (syncZustand === "ruhe") kalAboAktualisieren();
+        else if (syncZustand === "ruhe") { kalAboAktualisieren(); googleHolen(false); }
       });
     return syncLauf;
   }
@@ -6281,6 +6345,193 @@
     } else fertig(false);
   });
 
+  /* ---------- Google-Termine ---------- */
+  // Die geheime iCal-Adresse des Google-Kalenders liegt in den Einstellungen
+  // (kommt per Sync auf alle Geraete). Abgeholt wird ueber die Edge Function
+  // faellig-google, weil der Browser Google nicht direkt fragen darf; sie loest
+  // auch Wiederholungen auf. Das Ergebnis merkt sich jedes Geraet, damit die
+  // Termine auch offline zu sehen sind. Angezeigt wird nur, nie geschrieben.
+
+  var G_MERK_KEY = "faellig-google-v1"; // je Geraet: { u: Streuwert der Adresse, am, termine }
+  var G_ABSTAND_MS = 15 * 60000;
+  var G_TAGE_ZEIGEN = 14;
+
+  function gAdresseOk(s) {
+    return typeof s === "string" &&
+      /^https:\/\/calendar\.google\.com\/calendar\/ical\/[^/?#\s]+\/[^/?#\s]+\/basic\.ics$/.test(s.trim());
+  }
+
+  function gAdresse() { return gAdresseOk(settings.googleIcal) ? settings.googleIcal.trim() : ""; }
+
+  function gMerkLaden() {
+    var o = null;
+    try { o = JSON.parse(localStorage.getItem("faellig-google-v1") || "null"); } catch (e) { o = null; }
+    var url = gAdresse();
+    if (!o || typeof o !== "object" || !url || o.u !== streuwert(url) || !Array.isArray(o.termine)) return null;
+    return o;
+  }
+
+  function gMerkSpeichern(o) {
+    try {
+      if (o) localStorage.setItem("faellig-google-v1", JSON.stringify(o));
+      else localStorage.removeItem("faellig-google-v1");
+    } catch (e) {}
+  }
+
+  function zweistellig(n) { return (n < 10 ? "0" : "") + n; }
+  function uhrzeit(d) { return zweistellig(d.getHours()) + ":" + zweistellig(d.getMinutes()); }
+  function gTagKurz(key) {
+    var d = fromKey(key);
+    return WEEKDAYS_SHORT[d.getDay()] + " " + d.getDate() + ". " + MONTHS_SHORT[d.getMonth()];
+  }
+
+  // Zeilen fuer die Fristenliste, in Ortszeit des Geraets. Vorbei ist vorbei;
+  // was schon laeuft (mehrtaegig), steht unter heute.
+  function googleZeilen() {
+    var m = gMerkLaden();
+    if (!m) return [];
+    var heuteKey = toKey(today());
+    var jetzt = Date.now();
+    var raus = [];
+    m.termine.forEach(function (t) {
+      if (!t || typeof t.start !== "string" || typeof t.ende !== "string") return;
+      var startKey, endeKey, startMs = 0;
+      if (t.ganztag) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(t.start) || !/^\d{4}-\d{2}-\d{2}$/.test(t.ende)) return;
+        if (t.ende <= heuteKey) return;
+        startKey = t.start;
+        endeKey = toKey(addDays(fromKey(t.ende), -1)); // letzter Tag, einschliesslich
+      } else {
+        var s = new Date(t.start), e = new Date(t.ende);
+        if (isNaN(s) || isNaN(e)) return;
+        if (e.getTime() <= jetzt && !(e.getTime() === s.getTime() && toKey(s) === heuteKey)) return;
+        startMs = s.getTime();
+        startKey = toKey(s);
+        endeKey = toKey(e.getTime() > s.getTime() ? new Date(e.getTime() - 1) : e);
+      }
+      var dueKey = startKey < heuteKey ? heuteKey : startKey;
+      if (daysUntil(dueKey) > G_TAGE_ZEIGEN) return;
+      raus.push({ kind: "google", t: t, dueKey: dueKey, startKey: startKey, endeKey: endeKey,
+                  startMs: startMs, isFixed: true, createdAt: 0 });
+    });
+    return raus;
+  }
+
+  function renderGoogleZeile(r) {
+    var t = r.t;
+    var zeit;
+    if (t.ganztag) {
+      zeit = r.endeKey > r.startKey ? "ganztägig bis " + gTagKurz(r.endeKey) : "ganztägig";
+    } else if (r.startKey < r.dueKey) {
+      zeit = "läuft bis " + (r.endeKey === r.dueKey ? uhrzeit(new Date(t.ende)) : gTagKurz(r.endeKey));
+    } else {
+      zeit = uhrzeit(new Date(t.start));
+      if (t.ende !== t.start) {
+        zeit += "–" + (r.endeKey === r.startKey ? "" : gTagKurz(r.endeKey) + " ") + uhrzeit(new Date(t.ende));
+      }
+    }
+    var bucket = bucketOf(r);
+    var tag = bucket === "today" || bucket === "tomorrow" ? "" : formatDue(r.dueKey);
+    var meta = '<span class="task__badge task__badge--google">Google</span>' +
+      '<span class="task__zeit">' + esc(zeit) + "</span>" +
+      (tag ? '<span class="task__due">' + esc(tag) + "</span>" : "") +
+      (t.ort ? '<span class="task__vertragsinfo">' + esc(t.ort) + "</span>" : "");
+    return '<div class="task task--google" data-google="' + esc(String(t.id || "")) + '">' +
+      '<div class="task__gcal" aria-hidden="true">◷</div>' +
+      '<div class="task__body">' +
+        '<div class="task__text">' + esc(t.titel || "(ohne Titel)") + "</div>" +
+        '<div class="task__meta">' + meta + "</div>" +
+      "</div>" +
+      "</div>";
+  }
+
+  var gLauf = null;
+  var gFehler = "";
+
+  function googleHolen(erzwingen) {
+    var url = gAdresse();
+    if (!meta.konto || !url) return Promise.resolve();
+    if (gLauf) return gLauf;
+    var m = gMerkLaden();
+    if (!erzwingen && m && Date.now() - m.am < G_ABSTAND_MS && !gFehler) return Promise.resolve();
+    if (navigator.onLine === false) return Promise.resolve();
+
+    gLauf = mitZugang(function (t) {
+      return anfrage("/functions/v1/faellig-google", "POST", { url: url, tage: 31 }, t);
+    }).then(function (r) {
+      if (gAdresse() !== url) return; // waehrenddessen getrennt oder geaendert
+      if (r.ok && r.json && Array.isArray(r.json.termine)) {
+        gMerkSpeichern({ u: streuwert(url), am: Date.now(), termine: r.json.termine });
+        gFehler = "";
+      } else {
+        gFehler = r.status === 404 && !(r.json && r.json.error)
+          ? "Der Abholdienst ist noch nicht eingerichtet."
+          : serverText(r);
+      }
+    }, function (e) {
+      if (e && e.art === "netz") return; // offline: alte Termine bleiben stehen
+      gFehler = (e && e.message) || "unbekannter Fehler";
+    }).then(function () {
+      gLauf = null;
+      gAnzeigen();
+      if (!wirdGeradeBearbeitet()) render();
+    });
+    gAnzeigen();
+    return gLauf;
+  }
+
+  function gAnzeigen() {
+    var ausEl = document.getElementById("gTerminAus");
+    var startEl = document.getElementById("gTerminStart");
+    var daEl = document.getElementById("gTerminDa");
+    var msgEl = document.getElementById("gTerminMsg");
+    if (!ausEl) return;
+    var angemeldet = !!meta.konto;
+    var url = gAdresse();
+    startEl.hidden = !angemeldet || !!url;
+    daEl.hidden = !url;
+    if (!angemeldet && !url) { meldung(msgEl, ""); return; }
+    if (!url) { meldung(msgEl, gFehler, gFehler ? false : null); return; }
+
+    var m = gMerkLaden();
+    if (!angemeldet) meldung(msgEl, "Abgemeldet: zeigt den Stand vom letzten Holen.", null);
+    else if (gFehler) meldung(msgEl, "Termine konnten nicht geholt werden: " + gFehler, false);
+    else if (gLauf) meldung(msgEl, "Wird geholt …", null);
+    else if (m) {
+      var n = googleZeilen().length;
+      meldung(msgEl, (n === 1 ? "1 Termin" : n + " Termine") + " in den nächsten zwei Wochen, geholt " +
+        zeitText(m.am) + ".", true);
+    } else meldung(msgEl, "Wird beim nächsten Sync geholt.", null);
+  }
+
+  document.getElementById("gTerminAn").addEventListener("click", function () {
+    var feld = document.getElementById("gTerminUrl");
+    var wert = (feld.value || "").trim();
+    if (!gAdresseOk(wert)) {
+      gFehler = "";
+      meldung(document.getElementById("gTerminMsg"),
+        "Das ist nicht die Privatadresse im iCal-Format. Sie beginnt mit https://calendar.google.com/calendar/ical/ und endet auf basic.ics.", false);
+      return;
+    }
+    settings.googleIcal = wert;
+    feld.value = "";
+    gFehler = "";
+    saveSettings(settings);
+    googleHolen(true);
+    syncBald(0);
+  });
+  document.getElementById("gTerminJetzt").addEventListener("click", function () { googleHolen(true); });
+  document.getElementById("gTerminTrennen").addEventListener("click", function () {
+    if (!confirm("Google-Kalender trennen? Fällig zeigt dann keine Google-Termine mehr, auf keinem Gerät.")) return;
+    delete settings.googleIcal;
+    gFehler = "";
+    gMerkSpeichern(null);
+    saveSettings(settings);
+    gAnzeigen();
+    render();
+    syncBald(0);
+  });
+
   /* ---------- Anzeige ---------- */
 
   var syncKopfEl = document.getElementById("syncKopf");
@@ -6320,6 +6571,7 @@
 
   function syncAnzeigen() {
     kalAboAnzeigen();
+    gAnzeigen();
     var offen = anzahlOffen();
     var angemeldet = !!meta.konto;
 
