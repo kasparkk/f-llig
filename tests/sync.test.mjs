@@ -16,6 +16,11 @@ const HTML = readFileSync(process.env.FAELLIG_HTML || new URL("../index.html", i
 const BASIS = "https://xrrcuapiugwgqxxatkiq.supabase.co";
 const META_KEY = "faellig-sync-v1";
 const NOTIZEN_KEY = "faellig-notizen-v1";
+const AUFGABEN_KEY = "faellig-aufgaben-v1";
+const VORLAGEN_KEY = "faellig-vorlagen-v1";
+const ENT_KEY = "faellig-entscheidungen-v1";
+const EINST_KEY = "faellig-einstellungen-v1";
+const TAG = 86_400_000;
 
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -129,6 +134,16 @@ class FakeSupabase {
       return { status: 200, body: n };
     }
 
+    if (u.pathname === "/rest/v1/rpc/faellig_aufraeumen" && methode === "POST") {
+      // wie die echte Funktion: nur eigene Grabsteine, aelter als `tage`
+      const grenze = Date.now() - Number(koerper.tage) * TAG;
+      let n = 0;
+      for (const [k, z] of this.zeilen) {
+        if (k.startsWith(uid + "|") && z.geloescht && z.geaendert_am < grenze) { this.zeilen.delete(k); n++; }
+      }
+      return { status: 200, body: n };
+    }
+
     if (u.pathname === "/rest/v1/faellig_daten" && methode === "GET") {
       let liste = [...this.zeilen.entries()]
         .filter(([k]) => k.startsWith(uid + "|"))
@@ -230,6 +245,29 @@ class Geraet {
   async syncen() {
     this.win.document.getElementById("syncJetzt").click();
     await this.ruhig();
+  }
+
+  // Sicherung uebertragen wie per Hand: Text einfuegen, Knopf tippen.
+  async importieren(paket, art = "dazu") {
+    const d = this.win.document;
+    const feld = d.getElementById("impText");
+    feld.value = typeof paket === "string" ? paket : JSON.stringify(paket);
+    feld.dispatchEvent(new this.win.Event("input"));
+    const knopf = d.getElementById(art === "dazu" ? "impMerge" : "impReplace");
+    assert.equal(knopf.disabled, false, `${this.name}: Sicherung wurde nicht erkannt: ${d.getElementById("impMsg").textContent}`);
+    knopf.click();
+    await this.ruhig();
+  }
+
+  exportText() {
+    this.win.document.getElementById("expFile"); // vorhanden
+    return this.win.document.getElementById("expText").value;
+  }
+
+  // Merkzettel aendern, waehrend die App zu ist.
+  metaAendern(fn) {
+    const m = JSON.parse(this.speicher[META_KEY] || "{}");
+    this.speicher[META_KEY] = JSON.stringify(fn(m) || m);
   }
 
   // App schliessen; der Speicher bleibt, wie er gerade ist.
@@ -425,4 +463,196 @@ test("Viele Eintraege werden in Paketen hochgeladen (Server nimmt hoechstens 500
   await b.oeffnen();
   assert.equal(b.notizen().filter((n) => n.id.startsWith("m")).length, 950);
   b.schliessen();
+});
+
+/* ---------------- Sicherung uebertragen ---------------- */
+
+const sicherung = (teile) => ({ app: "faellig", version: 1, exportedAt: "2026-11-01T10:00:00.000Z",
+  items: [], notes: [], vorlagen: [], entscheidungen: [], settings: {}, ...teile });
+
+test("Sichern enthaelt alle Sammlungen, Alles ersetzen stellt sie auf einem anderen Geraet wieder her", async () => {
+  const server = new FakeSupabase();
+  const a = new Geraet("Handy", server);
+  a.speicher[AUFGABEN_KEY] = JSON.stringify([{ id: "t1", text: "Steuer", dueKey: "2026-12-01", done: false, createdAt: 1 }]);
+  a.speicher[NOTIZEN_KEY] = JSON.stringify([notiz("n1", "Notiz eins")]);
+  a.speicher[VORLAGEN_KEY] = JSON.stringify([{ id: "v1", title: "Mahnung", betreff: "", text: "Bitte zahlen", createdAt: 1 }]);
+  a.speicher[ENT_KEY] = JSON.stringify([{ id: "e1", frage: "Bangor oder nicht?", createdAt: 1 }]);
+  a.speicher[EINST_KEY] = JSON.stringify({ ich: "K", icsAlarm: "2tage", icsAbos: true, icsFolge: 7 });
+  await a.oeffnen();
+  const text = a.exportText();
+  const p = JSON.parse(text);
+  assert.equal(p.app, "faellig");
+  assert.deepEqual(p.items.map((x) => x.id), ["t1"]);
+  assert.deepEqual(p.notes.map((x) => x.id), ["n1"]);
+  assert.deepEqual(p.vorlagen.map((x) => x.id), ["v1"]);
+  assert.deepEqual(p.entscheidungen.map((x) => x.id), ["e1"]);
+  assert.equal(p.settings.ich, "K");
+  a.schliessen();
+
+  const b = new Geraet("Neues Handy", server);
+  b.speicher[NOTIZEN_KEY] = JSON.stringify([notiz("x", "fliegt raus")]);
+  await b.oeffnen();
+  await b.importieren(text, "ersetzen");
+  const ls = (k) => JSON.parse(b.win.localStorage.getItem(k));
+  assert.deepEqual(ls(AUFGABEN_KEY).map((x) => x.text), ["Steuer"]);
+  assert.deepEqual(ls(NOTIZEN_KEY).map((x) => x.id), ["n1"]);
+  assert.deepEqual(ls(VORLAGEN_KEY).map((x) => x.title), ["Mahnung"]);
+  assert.deepEqual(ls(ENT_KEY).map((x) => x.frage), ["Bangor oder nicht?"]);
+  const einst = ls(EINST_KEY);
+  assert.equal(einst.ich, "K");
+  assert.equal(einst.icsAlarm, "2tage");
+  assert.equal(einst.icsAbos, true);
+  assert.equal(einst.icsFolge, 7);
+  b.schliessen();
+});
+
+test("Dazunehmen: Uebertragenes geht als neue Aenderung ins Konto und zum anderen Geraet", async () => {
+  const { server, a, b } = await zweiGeraete();
+  await a.oeffnen();
+  await a.importieren(sicherung({
+    notes: [notiz("i1", "aus der Sicherung")],
+    items: [{ id: "it1", text: "Reisepass verlaengern", dueKey: "2027-01-10", createdAt: 1 }],
+  }));
+  assert.equal(a.kopfText(), "Synchron");
+  assert.equal(server.daten("u1", "notizen", "i1")?.daten.text, "aus der Sicherung");
+  assert.equal(server.daten("u1", "aufgaben", "it1")?.daten.text, "Reisepass verlaengern");
+  assert.deepEqual(a.meta().importiert, {}, "nach dem Hochladen ist nichts mehr als importiert markiert");
+  a.schliessen();
+  await b.oeffnen();
+  assert.equal(b.notiz("i1")?.text, "aus der Sicherung");
+  b.schliessen();
+});
+
+test("Dazunehmen auf neuem Geraet ueberschreibt keine neuere Fassung im Konto", async () => {
+  const { server, a } = await zweiGeraete();
+  a.notizenAendern((l) => [notiz("n20", "alt"), ...l]);
+  await a.oeffnen(); a.schliessen();
+  const alteSicherung = sicherung({ notes: [notiz("n20", "alt"), notiz("n21", "nur in der Sicherung")] });
+  a.notizenAendern((l) => l.map((n) => (n.id === "n20" ? { ...n, text: "neu" } : n)));
+  await a.oeffnen(); a.schliessen();
+
+  // Neues Geraet: erst Sicherung dazunehmen, dann anmelden.
+  const c = new Geraet("Tablet", server);
+  await c.oeffnen();
+  await c.importieren(alteSicherung);
+  assert.equal(c.notiz("n20")?.text, "alt");
+  c.schliessen();
+  await c.oeffnen({ sitzung: server.sitzung("u1", "k@test") });
+  assert.equal(c.notiz("n20")?.text, "neu", "Fassung im Konto muss gewinnen");
+  assert.equal(c.notiz("n21")?.text, "nur in der Sicherung");
+  c.schliessen();
+  assert.equal(server.daten("u1", "notizen", "n20")?.daten.text, "neu");
+  assert.equal(server.daten("u1", "notizen", "n21")?.daten.text, "nur in der Sicherung");
+});
+
+test("Dazunehmen stellt im Konto Geloeschtes wieder her, auf allen Geraeten", async () => {
+  const { server, a, b } = await zweiGeraete();
+  a.notizenAendern((l) => [notiz("n22", "wichtig"), ...l]);
+  await a.oeffnen(); a.schliessen();
+  await b.oeffnen(); b.schliessen();
+  b.notizenAendern((l) => l.filter((n) => n.id !== "n22"));
+  await b.oeffnen(); b.schliessen();
+  assert.equal(server.daten("u1", "notizen", "n22")?.geloescht, true);
+
+  await a.oeffnen();
+  assert.equal(a.notiz("n22"), undefined);
+  await a.importieren(sicherung({ notes: [notiz("n22", "wichtig")] }));
+  assert.equal(a.notiz("n22")?.text, "wichtig", "darf nicht gleich wieder verschwinden");
+  a.schliessen();
+  assert.equal(server.daten("u1", "notizen", "n22")?.geloescht, false);
+  await b.oeffnen();
+  assert.equal(b.notiz("n22")?.text, "wichtig");
+  b.schliessen();
+});
+
+test("Alles ersetzen gilt auch fuer Eintraege, die dieses Geraet noch nicht kannte", async () => {
+  const { server, a, b } = await zweiGeraete();
+  a.notizenAendern((l) => [notiz("n30", "bleibt, geaendert"), notiz("n31", "fliegt"), ...l]);
+  await a.oeffnen(); a.schliessen();
+  await b.oeffnen(); b.schliessen();
+  a.notizenAendern((l) => [notiz("n32", "kennt B noch nicht"), ...l]);
+  await a.oeffnen(); a.schliessen();
+
+  server.offline = true;
+  await b.oeffnen();
+  await b.importieren(sicherung({ notes: [notiz("n30", "aus der Sicherung"), notiz("n33", "neu")] }), "ersetzen");
+  server.offline = false;
+  await b.syncen();
+  assert.deepEqual(b.notizen().map((n) => n.id).sort(), ["n30", "n33"]);
+  assert.equal(b.meta().ersetzen, undefined, "nach vollem Abgleich erledigt");
+  b.schliessen();
+
+  for (const id of ["n31", "n32"]) assert.equal(server.daten("u1", "notizen", id)?.geloescht, true, id);
+  assert.equal(server.daten("u1", "notizen", "n30")?.daten.text, "aus der Sicherung");
+  await a.oeffnen();
+  assert.deepEqual(a.notizen().map((n) => n.id).sort(), ["n30", "n33"]);
+  a.schliessen();
+});
+
+/* ---------------- Grabsteine aufraeumen ---------------- */
+
+test("Grabsteine aelter als 90 Tage verschwinden lokal und im Konto, frische bleiben", async () => {
+  const { server, a } = await zweiGeraete();
+  a.notizenAendern((l) => [notiz("g1", "alt geloescht"), notiz("g2", "frisch geloescht"), ...l]);
+  await a.oeffnen(); a.schliessen();
+  a.notizenAendern((l) => l.filter((n) => n.id !== "g1" && n.id !== "g2"));
+  await a.oeffnen(); a.schliessen();
+
+  // g1 so tun, als waere es vor 100 Tagen geloescht worden. Dazu ein alter
+  // Grabstein, der noch nie hochgeladen wurde.
+  const vor100 = Date.now() - 100 * TAG;
+  server.zeilen.get("u1|notizen|g1").geaendert_am = vor100;
+  a.metaAendern((m) => {
+    m.tote["notizen|g1"] = vor100;
+    m.tote["notizen|g3"] = vor100;
+    m.offen["notizen|g3"] = true;
+    delete m.aufgeraeumt;
+  });
+
+  server.offline = true;
+  await a.oeffnen();
+  assert.ok(!("notizen|g1" in a.meta().tote), "hochgeladener alter Grabstein lokal weg");
+  assert.ok("notizen|g3" in a.meta().tote, "noch nicht hochgeladener Grabstein muss bleiben");
+  assert.ok("notizen|g2" in a.meta().tote, "frischer Grabstein bleibt");
+  server.offline = false;
+  await a.syncen();
+  const m = a.meta();
+  assert.ok(!("notizen|g3" in m.tote), "nach dem Hochladen auch weg");
+  assert.ok("notizen|g2" in m.tote);
+  assert.ok(m.aufgeraeumt > 0);
+  a.schliessen();
+
+  assert.equal(server.daten("u1", "notizen", "g1"), undefined, "im Konto aufgeraeumt");
+  assert.equal(server.daten("u1", "notizen", "g3"), undefined, "im Konto aufgeraeumt");
+  assert.equal(server.daten("u1", "notizen", "g2")?.geloescht, true, "frischer Grabstein bleibt im Konto");
+
+  // hoechstens einmal am Tag
+  const vorher = server.log.filter((z) => z.includes("faellig_aufraeumen")).length;
+  await a.oeffnen(); await a.syncen(); a.schliessen();
+  assert.equal(server.log.filter((z) => z.includes("faellig_aufraeumen")).length, vorher);
+});
+
+test("Lange nicht abgeglichen: im Konto aufgeraeumtes Loeschen kommt nicht zurueck", async () => {
+  const { server, a, b } = await zweiGeraete();
+  a.notizenAendern((l) => [notiz("w1", "anderswo geloescht"), notiz("w2", "lebt noch"), ...l]);
+  await a.oeffnen(); a.schliessen();
+  await b.oeffnen(); b.schliessen();
+  a.notizenAendern((l) => l.filter((n) => n.id !== "w1"));
+  await a.oeffnen(); a.schliessen();
+
+  // B lag 100 Tage in der Schublade; inzwischen ist der Grabstein im Konto aufgeraeumt.
+  server.zeilen.delete("u1|notizen|w1");
+  const vor100 = Date.now() - 100 * TAG;
+  b.metaAendern((m) => {
+    m.zuletzt = vor100;
+    for (const k of Object.keys(m.stand)) m.stand[k].t = Math.min(m.stand[k].t, vor100);
+  });
+  b.notizenAendern((l) => [notiz("w3", "neu auf B"), ...l]);
+  await b.oeffnen();
+  assert.equal(b.notiz("w1"), undefined, "verwaister Eintrag muss weg");
+  assert.equal(b.notiz("w2")?.text, "lebt noch");
+  assert.equal(b.notiz("w3")?.text, "neu auf B");
+  b.schliessen();
+  assert.equal(server.daten("u1", "notizen", "w1"), undefined, "darf nicht wieder hochgeladen werden");
+  assert.equal(server.daten("u1", "notizen", "w3")?.daten.text, "neu auf B");
 });

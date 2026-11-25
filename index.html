@@ -5016,6 +5016,30 @@
     if (backupEl.open) expFuellen();
   }
 
+  // Einstellungen aus der Sicherung. Dazunehmen fuellt nur Luecken, Ersetzen
+  // uebernimmt alles. Der Zaehler fuer Kalender-Dateien geht nie zurueck,
+  // sonst halten Kalender eine neue Datei fuer eine alte.
+  var EINST_FELDER = {
+    ich: function (v) { return typeof v === "string"; },
+    icsAbos: function (v) { return typeof v === "boolean"; },
+    icsAlarm: function (v) { return typeof v === "string" && ALARME.hasOwnProperty(v); },
+  };
+
+  function einstellungenUebernehmen(quelle, ueberschreiben) {
+    if (!quelle || typeof quelle !== "object") return;
+    Object.keys(EINST_FELDER).forEach(function (k) {
+      if (!(k in quelle) || !EINST_FELDER[k](quelle[k])) return;
+      if (k === "ich" && !quelle[k].trim()) return;
+      if (ueberschreiben || settings[k] === undefined || settings[k] === "") settings[k] = quelle[k];
+    });
+    if (typeof quelle.icsFolge === "number" && isFinite(quelle.icsFolge) &&
+        quelle.icsFolge > (typeof settings.icsFolge === "number" ? settings.icsFolge : 0)) {
+      settings.icsFolge = Math.floor(quelle.icsFolge);
+    }
+    if (typeof icsAbosEl !== "undefined" && icsAbosEl) icsAbosEl.checked = !!settings.icsAbos;
+    if (typeof icsAlarmEl !== "undefined" && icsAlarmEl && settings.icsAlarm) icsAlarmEl.value = settings.icsAlarm;
+  }
+
   impMergeBtn.addEventListener("click", function () {
     if (!wartendesPaket) return;
     var p = wartendesPaket;
@@ -5042,7 +5066,7 @@
     neueEntsch.forEach(function (e) { entscheidungen.push(e); });
     notes.sort(function (a, b) { return b.createdAt - a.createdAt; });
 
-    if (!settings.ich && p.settings.ich) settings.ich = p.settings.ich;
+    einstellungenUebernehmen(p.settings, false);
 
     save(items);
     saveNotes();
@@ -5050,6 +5074,15 @@
     saveEnt();
     saveSettings(settings);
     allesNeuZeichnen();
+
+    // Dem Sync sagen, was neu dazugekommen ist: das geht als neue Aenderung
+    // ins Konto, ersetzt dort aber nichts, was es schon gibt.
+    var neueSchluessel = [];
+    neueEintraege.forEach(function (i) { neueSchluessel.push("aufgaben|" + i.id); });
+    neueNotizen.forEach(function (n) { neueSchluessel.push("notizen|" + n.id); });
+    neueVorlagen.forEach(function (v) { neueSchluessel.push("vorlagen|" + v.id); });
+    neueEntsch.forEach(function (e) { neueSchluessel.push("entscheidungen|" + e.id); });
+    syncNachImport("dazu", neueSchluessel);
 
     var dazu = neueEintraege.length + neueNotizen.length + neueVorlagen.length + neueEntsch.length;
     if (!dazu) fertig("War schon alles da \u2014 nichts doppelt angelegt.");
@@ -5059,7 +5092,8 @@
   impReplaceBtn.addEventListener("click", function () {
     if (!wartendesPaket) return;
     var vorher = mengenText(items, notes, eigene, entscheidungen);
-    if (!confirm("Alles ersetzen?\n\nWas jetzt drin ist (" + vorher + "), wird gel\u00f6scht und durch die Sicherung ersetzt.")) return;
+    if (!confirm("Alles ersetzen?\n\nWas jetzt drin ist (" + vorher + "), wird gel\u00f6scht und durch die Sicherung ersetzt." +
+                 (syncAngemeldet() ? "\n\nDu bist angemeldet: das gilt auch f\u00fcr deine anderen Ger\u00e4te." : ""))) return;
 
     var p = wartendesPaket;
     items.length = 0;
@@ -5073,7 +5107,7 @@
     (p.entscheidungen || []).forEach(function (e) { entscheidungen.push(e); });
     entOffen = null;
 
-    if (p.settings.ich) settings.ich = p.settings.ich;
+    einstellungenUebernehmen(p.settings, true);
 
     save(items);
     saveNotes();
@@ -5081,6 +5115,7 @@
     saveEnt();
     saveSettings(settings);
     allesNeuZeichnen();
+    syncNachImport("ersetzen");
     fertig("Ersetzt \u2014 jetzt drin: " + mengenText(items, notes, eigene, entscheidungen) + ".");
   });
 
@@ -5511,6 +5546,10 @@
   // stand:  "sammlung|id" -> { h: Streuwert des Inhalts, t: Zeitpunkt der letzten Aenderung }
   // tote:   "sammlung|id" -> Zeitpunkt des Loeschens (Grabstein)
   // offen:  "sammlung|id" -> true, solange noch nicht hochgeladen
+  // importiert: "sammlung|id" -> true fuer per "Dazunehmen" Uebertragenes,
+  //         das noch nicht mit dem Konto abgeglichen ist (siehe fernUebernehmen)
+  // ersetzen: Zeitpunkt von "Alles ersetzen", bis der naechste volle Abgleich durch ist
+  // aufgeraeumt: wann zuletzt alte Grabsteine im Konto entfernt wurden
 
   function metaLaden() {
     var o = null;
@@ -5519,6 +5558,7 @@
     if (!o.stand || typeof o.stand !== "object") o.stand = {};
     if (!o.tote || typeof o.tote !== "object") o.tote = {};
     if (!o.offen || typeof o.offen !== "object") o.offen = {};
+    if (!o.importiert || typeof o.importiert !== "object") o.importiert = {};
     if (!o.konto || typeof o.konto !== "object") o.konto = null;
     return o;
   }
@@ -5581,6 +5621,7 @@
         if (alt && alt.h === h) return;
         meta.stand[k] = { h: h, t: ersterLauf ? 0 : jetzt };
         delete meta.tote[k];
+        delete meta.importiert[k]; // selbst bearbeitet: ab jetzt eine normale Aenderung
         meta.offen[k] = true;
         geaendert = true;
       });
@@ -5588,6 +5629,7 @@
     Object.keys(meta.stand).forEach(function (k) {
       if (gesehen[k]) return;
       delete meta.stand[k];
+      delete meta.importiert[k];
       meta.tote[k] = jetzt;
       meta.offen[k] = true;
       geaendert = true;
@@ -5712,7 +5754,7 @@
 
   /* ---------- Abgleich ---------- */
 
-  function fernUebernehmen(zeilen, geaendert) {
+  function fernUebernehmen(zeilen, geaendert, gesehen) {
     zeilen.forEach(function (z) {
       var s = SAMMLUNGEN[z.sammlung];
       if (!s || typeof z.eintrag_id !== "string") return;
@@ -5720,7 +5762,30 @@
       var k = schluessel(z.sammlung, id);
       var fernT = Number(z.geaendert_am);
       if (!isFinite(fernT)) return;
+      if (gesehen) gesehen[k] = true;
       var lokalT = meta.stand[k] ? meta.stand[k].t : (k in meta.tote ? meta.tote[k] : null);
+
+      // Per "Dazunehmen" Uebertragenes ersetzt nichts, was im Konto lebt.
+      // Ist es dort geloescht, war das Uebertragen eine Wiederherstellung:
+      // dann bleibt es und geht als neueste Aenderung hoch.
+      if (meta.importiert[k] && meta.stand[k]) {
+        delete meta.importiert[k];
+        if (z.geloescht) {
+          meta.stand[k].t = Math.max(meta.stand[k].t, fernT + 1, syncZeit());
+          meta.offen[k] = true;
+          return;
+        }
+        lokalT = null; // Fassung im Konto uebernehmen, egal wie alt
+      }
+
+      // Nach "Alles ersetzen": was im Konto lebt, hier aber nicht mehr da ist
+      // und vor dem Ersetzen zuletzt geaendert wurde, wird ueberall geloescht.
+      if (meta.ersetzen && lokalT === null && !z.geloescht && fernT < meta.ersetzen &&
+          z.sammlung !== "einstellungen") {
+        meta.tote[k] = meta.ersetzen;
+        meta.offen[k] = true;
+        return;
+      }
 
       if (lokalT !== null && fernT < lokalT) { meta.offen[k] = true; return; }
 
@@ -5746,8 +5811,9 @@
     });
   }
 
-  function holen(token, geaendert, gesichert) {
+  function holen(token, geaendert, gesichert, gesehen) {
     var ab = meta.cursor;
+    if (ab) gesehen = null; // nur ein voller Abgleich sieht wirklich alles
     var neuesterServerAm = null;
     var SEITE = 1000;
     function seite(versatz) {
@@ -5756,7 +5822,7 @@
       if (ab) q += "&server_am=gt." + encodeURIComponent(ab);
       return mitZugang(function (t) { return anfrage(q, "GET", undefined, t); }).then(function (r) {
         if (!r.ok || !Array.isArray(r.json)) throw new SyncFehler("server", "Laden: " + serverText(r));
-        fernUebernehmen(r.json, geaendert);
+        fernUebernehmen(r.json, geaendert, gesehen);
         r.json.forEach(function (z) {
           if (z.server_am && (!neuesterServerAm || Date.parse(z.server_am) > Date.parse(neuesterServerAm))) {
             neuesterServerAm = z.server_am;
@@ -5780,8 +5846,11 @@
     });
   }
 
-  function hochladen() {
+  // ohneImportiert: Uebertragenes wartet, bis ein voller Abgleich gezeigt hat,
+  // was davon im Konto schon lebt.
+  function hochladen(ohneImportiert) {
     var keys = Object.keys(meta.offen);
+    if (ohneImportiert) keys = keys.filter(function (k) { return !meta.importiert[k]; });
     if (!keys.length) return Promise.resolve();
     var karten = {};
     Object.keys(SAMMLUNGEN).forEach(function (s) { karten[s] = SAMMLUNGEN[s].eintraege(); });
@@ -5801,7 +5870,7 @@
         delete meta.offen[k];
       }
     });
-    if (!zeilen.length) { metaSpeichern(); return hochladen(); }
+    if (!zeilen.length) { metaSpeichern(); return hochladen(ohneImportiert); }
     return mitZugang(function (t) {
       return anfrage("/rest/v1/rpc/faellig_hochladen", "POST", { zeilen: zeilen }, t);
     }).then(function (r) {
@@ -5809,11 +5878,88 @@
       // Nur abhaken, was sich waehrenddessen nicht wieder geaendert hat.
       Object.keys(gesendet).forEach(function (k) {
         var jetztT = meta.stand[k] ? meta.stand[k].t : meta.tote[k];
-        if (jetztT === gesendet[k]) delete meta.offen[k];
+        if (jetztT === gesendet[k]) { delete meta.offen[k]; delete meta.importiert[k]; }
       });
       metaSpeichern();
-      if (Object.keys(meta.offen).length && keys.length > PAKET_GROESSE) return hochladen();
+      if (Object.keys(meta.offen).length && keys.length > PAKET_GROESSE) return hochladen(ohneImportiert);
     });
+  }
+
+  /* ---------- Grabsteine aufraeumen ---------- */
+  // Grabsteine braucht es nur, bis alle Geraete vom Loeschen erfahren haben.
+  // Nach 90 Tagen fliegen sie raus: hier und im Konto. Ein Geraet, das so
+  // lange nicht abgeglichen hat, holt danach einmal alles (siehe syncJetzt).
+
+  var GRAB_TAGE = 90;
+  var GRAB_MS = GRAB_TAGE * 86400000;
+  var AUFRAEUMEN_ALLE_MS = 86400000; // im Konto hoechstens einmal am Tag
+
+  // Lokal: nur Grabsteine, die schon im Konto angekommen sind. Was noch
+  // hochgeladen werden muss, bleibt, sonst kaeme das Geloeschte zurueck.
+  function grabsteineAufraeumen() {
+    var grenze = syncZeit() - GRAB_MS;
+    var weg = 0;
+    Object.keys(meta.tote).forEach(function (k) {
+      if (meta.tote[k] < grenze && !meta.offen[k]) { delete meta.tote[k]; weg++; }
+    });
+    if (weg) metaSpeichern();
+    return weg;
+  }
+
+  // Im Konto: ueber faellig_aufraeumen. Fehlt die Funktion (noch) oder
+  // klappt es nicht, ist das kein Sync-Fehler, dann eben beim naechsten Mal.
+  function kontoAufraeumen() {
+    if (meta.aufgeraeumt && Date.now() - meta.aufgeraeumt < AUFRAEUMEN_ALLE_MS) return Promise.resolve();
+    return mitZugang(function (t) {
+      return anfrage("/rest/v1/rpc/faellig_aufraeumen", "POST", { tage: GRAB_TAGE }, t);
+    }).then(function (r) {
+      if (r.ok) { meta.aufgeraeumt = Date.now(); metaSpeichern(); }
+    }, function (e) { if (e && e.art === "abgemeldet") throw e; });
+  }
+
+  // Nach langer Pause: was hier noch lebt, schon im Konto war, dort aber
+  // fehlt und seit vor der Grenze unveraendert ist, wurde anderswo geloescht
+  // und der Grabstein ist inzwischen aufgeraeumt. Also auch hier weg.
+  function verwaistesEntfernen(gesehen, geaendert) {
+    var grenze = syncZeit() - GRAB_MS;
+    var weg = 0;
+    Object.keys(meta.stand).forEach(function (k) {
+      if (gesehen[k] || meta.offen[k] || meta.stand[k].t >= grenze) return;
+      var teil = zerlegen(k);
+      if (teil.s === "einstellungen" || !SAMMLUNGEN[teil.s]) return;
+      SAMMLUNGEN[teil.s].uebernehmen(teil.id, null);
+      delete meta.stand[k];
+      delete meta.importiert[k];
+      geaendert[teil.s] = true;
+      weg++;
+    });
+    return weg;
+  }
+
+  /* ---------- Uebertragen (Sicherung) und Sync ---------- */
+
+  function syncAngemeldet() { return !!meta.konto; }
+
+  // Wird nach "Dazunehmen" bzw. "Alles ersetzen" aufgerufen, nachdem lokal
+  // gespeichert ist. Die Aenderungen werden sofort erfasst, damit sie nicht
+  // erst mit Verzoegerung im Merkzettel landen.
+  //   dazu:     neue Eintraege gehen hoch, ersetzen im Konto aber nichts
+  //             Lebendes. Dafuer einmal alles holen.
+  //   ersetzen: die Sicherung ist der neue Stand, auf allen Geraeten.
+  function syncNachImport(art, schluessel) {
+    clearTimeout(erfassTimer);
+    aenderungenErfassen();
+    if (art === "dazu") {
+      (schluessel || []).forEach(function (k) { if (meta.stand[k]) meta.importiert[k] = true; });
+    } else if (art === "ersetzen" && meta.konto) {
+      meta.ersetzen = syncZeit();
+    }
+    // Beim naechsten Sync einmal alles holen. Nicht einfach den Cursor
+    // loeschen: ein gerade laufender Sync wuerde ihn gleich wieder setzen.
+    if (meta.konto) meta.vollHolen = syncZeit();
+    metaSpeichern();
+    syncAnzeigen();
+    syncBald(0);
   }
 
   /* ---------- Ablauf ---------- */
@@ -5845,11 +5991,32 @@
     syncAnzeigen();
     var geaendert = {};
     var gesichert = {};
+    var gesehen = {};
+    // Lange nicht abgeglichen: Grabsteine von damals koennen im Konto schon
+    // aufgeraeumt sein. Dann einmal alles holen und Verwaistes hier entfernen.
+    var langeWeg = !!meta.zuletzt && Date.now() - meta.zuletzt > GRAB_MS;
+    var vollHolenVorher = meta.vollHolen;
+    if (langeWeg || vollHolenVorher) meta.cursor = null;
+    var vollerAbgleich = !meta.cursor;
+    var ersetzenVorher = meta.ersetzen;
     syncLauf = zugangHolen(false)
       .then(function () { return uhrMessen(); })
-      .then(function () { aenderungenErfassen(); return holen(null, geaendert, gesichert); })
-      .then(function () { return hochladen(); })
+      .then(function () { aenderungenErfassen(); return holen(null, geaendert, gesichert, gesehen); })
       .then(function () {
+        if (langeWeg && verwaistesEntfernen(gesehen, geaendert)) {
+          Object.keys(geaendert).forEach(function (s) { SAMMLUNGEN[s].speichern(); gesichert[s] = true; });
+          metaSpeichern();
+        }
+      })
+      .then(function () { return hochladen(!vollerAbgleich); })
+      .then(function () {
+        if (vollerAbgleich && meta.vollHolen && meta.vollHolen === vollHolenVorher) delete meta.vollHolen;
+        // "Alles ersetzen" ist erst durch, wenn ein voller Abgleich danach geklappt hat.
+        if (vollerAbgleich && meta.ersetzen && meta.ersetzen === ersetzenVorher) delete meta.ersetzen;
+        return kontoAufraeumen();
+      })
+      .then(function () {
+        grabsteineAufraeumen();
         meta.zuletzt = Date.now();
         metaSpeichern();
         syncZustand = "ruhe";
@@ -6088,6 +6255,8 @@
     meta.konto = null;
     meta.cursor = null;
     meta.zuletzt = null;
+    delete meta.ersetzen;
+    delete meta.vollHolen;
     metaSpeichern();
     syncZustand = "ruhe";
     syncFehlerText = "";
@@ -6119,6 +6288,7 @@
   backupEl.addEventListener("toggle", function () { if (backupEl.open) syncAnzeigen(); });
 
   aenderungenErfassen();
+  grabsteineAufraeumen();
   syncBereit = true;
   linkAuswerten();
   syncAnzeigen();
