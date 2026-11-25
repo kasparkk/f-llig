@@ -1139,6 +1139,9 @@
 
   .backup__hint { font-size: 0.8rem; color: var(--ink-faint); line-height: 1.5; }
 
+  .backup__link { width: 100%; box-sizing: border-box; font-size: 16px; padding: 10px; margin-bottom: 8px;
+    border: 1px solid var(--line, #ccc); border-radius: 8px; background: transparent; color: inherit; }
+  #kalAbo .btn { min-height: 48px; display: inline-flex; align-items: center; text-decoration: none; }
   .backup__row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
   .backup textarea {
@@ -1663,6 +1666,37 @@
   <details class="backup" id="kalender">
     <summary>Fristen in den Kalender</summary>
     <div class="backup__body">
+      <div class="backup__block" id="kalAbo">
+        <span class="backup__title">Abo-Link &mdash; bleibt von selbst aktuell</span>
+        <span class="backup__hint" id="kalAboAus">
+          Dein Kalender abonniert deine Fristen &uuml;ber einen geheimen Link. &Auml;nderst du hier etwas,
+          zieht der Kalender nach, ohne neuen Import. Braucht die Anmeldung unter
+          &bdquo;Ger&auml;te abgleichen&ldquo;.
+        </span>
+        <div class="backup__row" id="kalAboStart" hidden>
+          <button class="btn btn--primary" id="kalAboAn" type="button">Abo-Link erstellen</button>
+        </div>
+        <div id="kalAboDa" hidden>
+          <input class="backup__link" id="kalAboUrl" type="text" readonly aria-label="Abo-Link" />
+          <div class="backup__row">
+            <a class="btn btn--primary" id="kalAboGoogle" target="_blank" rel="noopener" href="#">In Google Kalender</a>
+            <a class="btn" id="kalAboWebcal" href="#">Apple / andere</a>
+            <button class="btn" id="kalAboKopieren" type="button">Link kopieren</button>
+          </div>
+          <span class="backup__hint">
+            Google holt Abos nur alle paar Stunden neu, Apple etwa st&uuml;ndlich. Google nimmt Abos nur in der
+            Web-Ansicht an, am besten am Laptop. Erinnerungen
+            stellst du im Kalender beim abonnierten Kalender &bdquo;F&auml;llig&ldquo; ein. Wer den Link hat,
+            sieht deine Fristen &mdash; also nicht weitergeben.
+          </span>
+          <div class="backup__row">
+            <button class="btn" id="kalAboNeu" type="button">Neuer Link</button>
+            <button class="btn" id="kalAboEnde" type="button">Abo beenden</button>
+          </div>
+        </div>
+        <span class="backup__msg" id="kalAboMsg"></span>
+      </div>
+
       <div class="backup__block">
         <span class="backup__title">Alles auf einmal &mdash; als Datei</span>
         <span class="backup__hint">
@@ -1716,7 +1750,7 @@
 
   // Wird bei jeder Veroeffentlichung hochgezaehlt. Steht unten in der
   // Fusszeile, damit man eine haengengebliebene alte Fassung sofort erkennt.
-  var FASSUNG = "25.11.2026 Sync 2";
+  var FASSUNG = "25.11.2026 Kalender-Abo";
 
   var STORAGE_KEY = "faellig-aufgaben-v1";
   var SETTINGS_KEY = "faellig-einstellungen-v1";
@@ -5274,16 +5308,21 @@
     return t.trim();
   }
 
-  function icsBauen(mitAbos, alarmId) {
+  // alsAbo: fuer den Abo-Link. Dann darf der Kalender auch leer sein, und
+  // die Folgenummer bleibt stehen (ein Abo ersetzt ohnehin alles).
+  function icsBauen(mitAbos, alarmId, alsAbo) {
     var liste = kalenderEintraege(mitAbos);
     var kuendListe = kuendKalender();
-    if (!liste.length && !kuendListe.length) return null;
+    if (!alsAbo && !liste.length && !kuendListe.length) return null;
 
     // Hoehere Nummer bei jedem Export: ein zweiter Import gilt dann als
     // Aktualisierung derselben Termine, nicht als neue.
-    var folge = (typeof settings.icsFolge === "number" ? settings.icsFolge : 0) + 1;
-    settings.icsFolge = folge;
-    saveSettings(settings);
+    var folge = 0;
+    if (!alsAbo) {
+      folge = (typeof settings.icsFolge === "number" ? settings.icsFolge : 0) + 1;
+      settings.icsFolge = folge;
+      saveSettings(settings);
+    }
 
     var stempel = icsZeitstempel(new Date());
     var alarm = ALARME[alarmId] || null;
@@ -5296,6 +5335,11 @@
       "METHOD:PUBLISH",
       "X-WR-CALNAME:Fällig",
     ];
+    if (alsAbo) {
+      // Bitte um stuendliches Nachsehen. Google haelt sich nicht daran, Apple schon.
+      z.push("REFRESH-INTERVAL;VALUE=DURATION:PT1H");
+      z.push("X-PUBLISHED-TTL:PT1H");
+    }
 
     liste.forEach(function (item) {
       var reihe = terminReihe(item);
@@ -5662,7 +5706,7 @@
     return fetch(SYNC_URL + pfad, {
       method: methode,
       headers: kopf,
-      body: koerper === undefined ? undefined : JSON.stringify(koerper),
+      body: koerper === undefined ? undefined : typeof koerper === "string" ? koerper : JSON.stringify(koerper),
       signal: abbruch ? abbruch.signal : undefined,
       cache: "no-store",
     }).then(function (res) {
@@ -6046,6 +6090,7 @@
         syncLauf = null;
         syncAnzeigen();
         if (syncNochmal) { syncNochmal = false; syncBald(300); }
+        else if (syncZustand === "ruhe") kalAboAktualisieren();
       });
     return syncLauf;
   }
@@ -6079,6 +6124,162 @@
     renderGoogleListe();
     if (backupEl.open) expFuellen();
   }
+
+  /* ---------- Kalender-Abo ---------- */
+  // Die App baut die Kalender-Datei selbst (dieselbe wie beim Export) und legt
+  // sie nach jedem Sync unter einem geheimen Namen in einen oeffentlichen
+  // Speicherordner. Der Kalender abonniert diese Adresse. Termine rechnet so
+  // nur die App aus, kein Server. Das Geheimnis liegt in den Einstellungen und
+  // kommt per Sync auf alle Geraete; jedes Geraet laedt nach, wenn sich bei ihm
+  // der Inhalt geaendert hat.
+
+  var KAL_EIMER = "faellig-kalender";
+  var KAL_MERK_KEY = "faellig-kalabo-v1"; // je Geraet: { pfad, h, am }
+
+  function kalMerkLaden() {
+    var o = null;
+    try { o = JSON.parse(localStorage.getItem(KAL_MERK_KEY) || "null"); } catch (e) { o = null; }
+    return o && typeof o === "object" ? o : {};
+  }
+  function kalMerkSpeichern(o) {
+    try { localStorage.setItem(KAL_MERK_KEY, JSON.stringify(o)); } catch (e) {}
+  }
+
+  function kalGeheimNeu() {
+    var b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return Array.prototype.map.call(b, function (x) { return (x < 16 ? "0" : "") + x.toString(16); }).join("");
+  }
+
+  function kalAboGueltig(v) {
+    return !!v && typeof v === "object" && typeof v.geheim === "string" && /^[0-9a-f]{32}$/.test(v.geheim);
+  }
+
+  // Ordner = Konto-ID, damit die Speicherregeln jedem nur den eigenen erlauben.
+  function kalPfad() {
+    if (!meta.konto || !meta.konto.uid || !kalAboGueltig(settings.kalAbo)) return null;
+    return meta.konto.uid + "/" + settings.kalAbo.geheim + ".ics";
+  }
+
+  function kalUrl(pfad) { return SYNC_URL + "/storage/v1/object/public/" + KAL_EIMER + "/" + pfad; }
+
+  function kalSpeicher(methode, pfad, text) {
+    var kopf = text === undefined ? undefined : {
+      "Content-Type": "text/calendar; charset=utf-8",
+      "x-upsert": "true",
+      "cache-control": "max-age=300",
+    };
+    return mitZugang(function (t) {
+      return anfrage("/storage/v1/object/" + KAL_EIMER + "/" + pfad, methode, text, t, kopf);
+    });
+  }
+
+  function kalInhaltWert(text) {
+    // Der Zeitstempel aendert sich bei jedem Bauen, der Inhalt nicht.
+    return streuwert(text.replace(/^DTSTAMP:.*$/mg, ""));
+  }
+
+  var kalLauf = null;
+  var kalNochmal = false;
+  var kalFehler = "";
+
+  function kalAboAktualisieren() {
+    if (!meta.konto) return Promise.resolve();
+    if (kalLauf) { kalNochmal = true; return kalLauf; }
+    var pfad = kalPfad();
+    var merk = kalMerkLaden();
+    var schritte = Promise.resolve();
+
+    // Alter Link (neu erzeugt oder beendet, egal auf welchem Geraet): Datei weg.
+    if (merk.pfad && merk.pfad !== pfad) {
+      var alt = merk.pfad;
+      schritte = schritte.then(function () { return kalSpeicher("DELETE", alt); }).then(function () {
+        var m = kalMerkLaden();
+        if (m.pfad === alt) kalMerkSpeichern({});
+      });
+    }
+
+    if (pfad) {
+      schritte = schritte.then(function () {
+        var text = icsBauen(!!settings.icsAbos, settings.icsAlarm || "1tag", true);
+        var h = kalInhaltWert(text);
+        var m = kalMerkLaden();
+        if (m.pfad === pfad && m.h === h) return;
+        return kalSpeicher("POST", pfad, text).then(function (r) {
+          if (!r.ok) throw new SyncFehler("server", serverText(r));
+          kalMerkSpeichern({ pfad: pfad, h: h, am: Date.now() });
+        });
+      });
+    }
+
+    kalLauf = schritte.then(function () { kalFehler = ""; }, function (e) {
+      if (e && e.art === "netz") return; // kommt beim naechsten Sync wieder dran
+      kalFehler = "Abo-Link konnte nicht aktualisiert werden: " + ((e && e.message) || "unbekannter Fehler") + ".";
+    }).then(function () {
+      kalLauf = null;
+      kalAboAnzeigen();
+      if (kalNochmal) { kalNochmal = false; return kalAboAktualisieren(); }
+    });
+    kalAboAnzeigen();
+    return kalLauf;
+  }
+
+  function kalAboAnzeigen() {
+    var ausEl = document.getElementById("kalAboAus");
+    var startEl = document.getElementById("kalAboStart");
+    var daEl = document.getElementById("kalAboDa");
+    var msgEl = document.getElementById("kalAboMsg");
+    if (!ausEl) return;
+    var angemeldet = !!meta.konto;
+    var pfad = kalPfad();
+    startEl.hidden = !angemeldet || !!pfad;
+    daEl.hidden = !pfad;
+    if (!angemeldet) { meldung(msgEl, ""); return; }
+    if (!pfad) { meldung(msgEl, kalFehler, kalFehler ? false : null); return; }
+
+    var url = kalUrl(pfad);
+    var webcal = url.replace(/^https:/, "webcal:");
+    document.getElementById("kalAboUrl").value = url;
+    document.getElementById("kalAboGoogle").href =
+      "https://calendar.google.com/calendar/r?cid=" + encodeURIComponent(webcal);
+    document.getElementById("kalAboWebcal").href = webcal;
+
+    var merk = kalMerkLaden();
+    if (kalFehler) meldung(msgEl, kalFehler, false);
+    else if (kalLauf) meldung(msgEl, "Wird hochgeladen …", null);
+    else if (merk.pfad === pfad && merk.am) meldung(msgEl, "Aktuell, hochgeladen " + zeitText(merk.am) + ".", true);
+    else meldung(msgEl, "Wird beim nächsten Sync hochgeladen.", null);
+  }
+
+  function kalAboSetzen(neu) {
+    if (neu) settings.kalAbo = { geheim: kalGeheimNeu() };
+    else delete settings.kalAbo;
+    kalFehler = "";
+    saveSettings(settings);
+    kalAboAnzeigen();
+    syncBald(0);
+  }
+
+  document.getElementById("kalAboAn").addEventListener("click", function () { kalAboSetzen(true); });
+  document.getElementById("kalAboNeu").addEventListener("click", function () {
+    if (!confirm("Neuen Link erzeugen? Der alte hört auf zu funktionieren; abonnierte Kalender musst du neu verbinden.")) return;
+    kalAboSetzen(true);
+  });
+  document.getElementById("kalAboEnde").addEventListener("click", function () {
+    if (!confirm("Abo beenden? Der Link hört auf zu funktionieren. Den abonnierten Kalender entfernst du im Kalender selbst.")) return;
+    kalAboSetzen(false);
+  });
+  document.getElementById("kalAboKopieren").addEventListener("click", function () {
+    var btn = this;
+    var url = document.getElementById("kalAboUrl").value;
+    function fertig(ok) {
+      btn.textContent = ok ? "Kopiert" : "Nicht kopiert";
+      setTimeout(function () { btn.textContent = "Link kopieren"; }, 1300);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () { fertig(true); }, function () { fertig(false); });
+    } else fertig(false);
+  });
 
   /* ---------- Anzeige ---------- */
 
@@ -6118,6 +6319,7 @@
   }
 
   function syncAnzeigen() {
+    kalAboAnzeigen();
     var offen = anzahlOffen();
     var angemeldet = !!meta.konto;
 
