@@ -1716,7 +1716,7 @@
 
   // Wird bei jeder Veroeffentlichung hochgezaehlt. Steht unten in der
   // Fusszeile, damit man eine haengengebliebene alte Fassung sofort erkennt.
-  var FASSUNG = "25.11.2026 Sync";
+  var FASSUNG = "25.11.2026 Sync 2";
 
   var STORAGE_KEY = "faellig-aufgaben-v1";
   var SETTINGS_KEY = "faellig-einstellungen-v1";
@@ -5456,6 +5456,7 @@
   var ZEITLIMIT_MS = 20000;
   var UEBERLAPPUNG_MS = 120000; // beim Nachholen etwas zurueckgreifen, damit nichts durchrutscht
   var PAKET_GROESSE = 400;
+  var UHR_TOLERANZ_MS = 1000; // kleinere Abweichungen sind Messrauschen
 
   var syncBereit = false;
 
@@ -5557,11 +5558,16 @@
 
   function inhaltWert(obj) { return streuwert(kanonisch(obj)); }
 
+  // "Neueste Aenderung gewinnt" vergleicht Zeitstempel verschiedener Geraete.
+  // Geht eine Uhr falsch, gewinnt sonst das falsche Geraet. Deshalb wird jeder
+  // Zeitstempel mit dem gemessenen Abstand zur Serveruhr korrigiert.
+  function syncZeit() { return Date.now() + (Number(meta.versatz) || 0); }
+
   // Vergleicht den aktuellen Stand mit dem gemerkten und merkt sich, was sich
   // geaendert hat. Beim allerersten Mal bekommt alles den Zeitpunkt 0: ist
   // derselbe Eintrag schon im Konto, gewinnt dann die Fassung im Konto.
   function aenderungenErfassen() {
-    var jetzt = Date.now();
+    var jetzt = syncZeit();
     var ersterLauf = !meta.grundstand;
     var geaendert = false;
     var gesehen = {};
@@ -5687,6 +5693,23 @@
     });
   }
 
+  // Fragt die Serveruhr und merkt sich den Abstand. Die halbe Laufzeit der
+  // Anfrage wird abgezogen. Schlaegt das fehl, bleibt der alte Wert.
+  function uhrMessen() {
+    var vorher = Date.now();
+    return mitZugang(function (t) { return anfrage("/rest/v1/rpc/faellig_jetzt", "POST", {}, t); })
+      .then(function (r) {
+        var server = Number(r.json);
+        if (!r.ok || !isFinite(server) || server <= 0) return;
+        var nachher = Date.now();
+        var versatz = Math.round(server - (vorher + nachher) / 2);
+        if (Math.abs(versatz - (Number(meta.versatz) || 0)) > UHR_TOLERANZ_MS) {
+          meta.versatz = Math.abs(versatz) > UHR_TOLERANZ_MS ? versatz : 0;
+          metaSpeichern();
+        }
+      }, function (e) { if (e && e.art !== "server") throw e; });
+  }
+
   /* ---------- Abgleich ---------- */
 
   function fernUebernehmen(zeilen, geaendert) {
@@ -5723,7 +5746,7 @@
     });
   }
 
-  function holen(token, geaendert) {
+  function holen(token, geaendert, gesichert) {
     var ab = meta.cursor;
     var neuesterServerAm = null;
     var SEITE = 1000;
@@ -5743,6 +5766,12 @@
       });
     }
     return seite(0).then(function () {
+      // Erst die Daten sichern, dann den Merkzettel. Andersherum wuerde ein
+      // Abbruch genau dazwischen (App weggewischt) die alte Fassung hier fuer
+      // eine neue Aenderung halten und sie ueber die neuere im Konto schreiben.
+      Object.keys(geaendert).forEach(function (s) {
+        if (!gesichert[s]) { SAMMLUNGEN[s].speichern(); gesichert[s] = true; }
+      });
       if (neuesterServerAm) {
         var c = new Date(Date.parse(neuesterServerAm) - UEBERLAPPUNG_MS).toISOString();
         if (!meta.cursor || Date.parse(c) > Date.parse(meta.cursor)) meta.cursor = c;
@@ -5815,8 +5844,10 @@
     syncZustand = "laeuft";
     syncAnzeigen();
     var geaendert = {};
+    var gesichert = {};
     syncLauf = zugangHolen(false)
-      .then(function () { return holen(null, geaendert); })
+      .then(function () { return uhrMessen(); })
+      .then(function () { aenderungenErfassen(); return holen(null, geaendert, gesichert); })
       .then(function () { return hochladen(); })
       .then(function () {
         meta.zuletzt = Date.now();
@@ -5842,7 +5873,7 @@
       .then(function () {
         var namen = Object.keys(geaendert);
         if (namen.length) {
-          namen.forEach(function (s) { SAMMLUNGEN[s].speichern(); });
+          namen.forEach(function (s) { if (!gesichert[s]) SAMMLUNGEN[s].speichern(); });
           neuZeichnen();
         }
         syncLauf = null;
