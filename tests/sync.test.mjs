@@ -191,6 +191,15 @@ class FakeSupabase {
       return { status: 200, body: liste.slice(off, off + lim).map((z) => JSON.parse(JSON.stringify(z))) };
     }
 
+    if (u.pathname === "/functions/v1/faellig-google" && methode === "POST") {
+      this.googleAbrufe = (this.googleAbrufe || 0) + 1;
+      if (this.googleAntwort) return this.googleAntwort;
+      if (!/^https:\/\/calendar\.google\.com\/calendar\/ical\/.+\/basic\.ics$/.test(koerper.url)) {
+        return { status: 400, body: { error: "keine Google-Adresse" } };
+      }
+      return { status: 200, body: { termine: this.googleTermine || [], am: Date.now() } };
+    }
+
     return { status: 404, body: { message: "unbekannt " + u.pathname } };
   }
 }
@@ -821,5 +830,136 @@ test("Kalender-Abo: abgemeldet kein Knopf, kein Hochladen", async () => {
   assert.equal(d.getElementById("kalAboStart").hidden, true);
   assert.equal(d.getElementById("kalAboDa").hidden, true);
   assert.equal(uploads(server), 0);
+  a.schliessen();
+});
+
+
+/* ---------------- Google-Termine ---------------- */
+
+const G_URL = "https://calendar.google.com/calendar/ical/k%40test/private-0123456789abcdef/basic.ics";
+
+function lokal(tagePlus, std, min = 0) {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + tagePlus, std, min);
+}
+function tagKey(tagePlus) {
+  const d = new Date();
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate() + tagePlus);
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+}
+function zeitTermin(id, titel, tagePlus, std, dauerMin = 60, ort = "") {
+  const s = lokal(tagePlus, std);
+  return { id, titel, ort, ganztag: false, start: s.toISOString(), ende: new Date(+s + dauerMin * 60000).toISOString() };
+}
+
+function googleZeilen(g) {
+  return [...g.win.document.querySelectorAll("#list .task--google")].map((el) => ({
+    titel: el.querySelector(".task__text").textContent,
+    meta: el.querySelector(".task__meta").textContent,
+    gruppe: el.closest(".group").querySelector(".group__head").firstChild.textContent.trim(),
+  }));
+}
+
+async function googleVerbinden(g, url = G_URL) {
+  const d = g.win.document;
+  d.getElementById("gTerminUrl").value = url;
+  d.getElementById("gTerminAn").click();
+  await g.ruhig();
+}
+
+test("Google-Termine: verbinden, anzeigen, nicht mitzaehlen, kommt aufs andere Geraet", async () => {
+  const { server, a, b } = await zweiGeraete();
+  server.googleTermine = [
+    zeitTermin("g-vorbei", "Schon vorbei", -1, 9),
+    zeitTermin("g-morgen", "Zahnarzt", 1, 10, 90, "Praxis Muster"),
+    zeitTermin("g-woche", "Vorlesung", 4, 9),
+    { id: "g-urlaub", titel: "Wochenende Brandenburg", ort: "", ganztag: true, start: tagKey(-1), ende: tagKey(2) },
+    zeitTermin("g-weit", "Zu weit weg", 20, 9),
+  ];
+  aufgabenAendern(a, (l) => [frist("f1", "Miete", tagKey(1)), ...l]);
+
+  await a.oeffnen();
+  const d = a.win.document;
+  assert.equal(d.getElementById("gTerminStart").hidden, false);
+
+  await googleVerbinden(a, "https://example.com/kalender.ics");
+  assert.match(d.getElementById("gTerminMsg").textContent, /nicht die Privatadresse/);
+  assert.equal(server.googleAbrufe || 0, 0, "falsche Adresse geht gar nicht erst raus");
+
+  await googleVerbinden(a);
+  const z = googleZeilen(a);
+  assert.deepEqual(z.map((x) => x.titel), ["Wochenende Brandenburg", "Zahnarzt", "Vorlesung"]);
+  assert.equal(z[0].gruppe, "Heute", "laufender Mehrtagestermin steht unter heute");
+  assert.match(z[0].meta, /ganztägig bis/);
+  assert.equal(z[1].gruppe, "Morgen");
+  assert.match(z[1].meta, /10:00–11:30/);
+  assert.match(z[1].meta, /Praxis Muster/);
+  // Kalendertermine zuerst, dann die Frist am selben Tag
+  const morgen = [...d.querySelectorAll("#list .group")].find((g) => /Morgen/.test(g.textContent));
+  assert.equal(morgen.querySelector(".group__count").textContent, "1", "nur die Frist zaehlt");
+  assert.ok(morgen.querySelector(".task--google").compareDocumentPosition(morgen.querySelector(".task[data-id='f1']")) &
+    a.win.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.equal(d.getElementById("countNum").textContent, "1", "Kopfzahl nur aus Fristen");
+  assert.match(d.getElementById("gTerminMsg").textContent, /3 Termine/);
+  assert.equal(d.getElementById("gTerminDa").hidden, false);
+  a.schliessen();
+
+  await b.oeffnen();
+  assert.deepEqual(googleZeilen(b).map((x) => x.titel), ["Wochenende Brandenburg", "Zahnarzt", "Vorlesung"]);
+  b.schliessen();
+});
+
+test("Google-Termine: offline bleiben die alten stehen, Fehler wird gemeldet, nicht dauernd neu geholt", async () => {
+  const { server, a } = await zweiGeraete();
+  server.googleTermine = [zeitTermin("g1", "Zahnarzt", 2, 10)];
+  await a.oeffnen();
+  await googleVerbinden(a);
+  const abrufe = server.googleAbrufe;
+  await a.syncen();
+  assert.equal(server.googleAbrufe, abrufe, "innerhalb von 15 Minuten nicht nochmal");
+  a.schliessen();
+
+  server.offline = true;
+  await a.oeffnen();
+  assert.deepEqual(googleZeilen(a).map((x) => x.titel), ["Zahnarzt"]);
+  a.schliessen();
+  server.offline = false;
+
+  server.googleAntwort = { status: 404, body: { error: "Google kennt diese Adresse nicht (mehr)." } };
+  await a.oeffnen();
+  a.win.document.getElementById("gTerminJetzt").click();
+  await a.ruhig();
+  const msg = a.win.document.getElementById("gTerminMsg");
+  assert.match(msg.textContent, /kennt diese Adresse nicht/);
+  assert.equal(msg.getAttribute("data-ok"), "false");
+  assert.deepEqual(googleZeilen(a).map((x) => x.titel), ["Zahnarzt"], "alte Termine bleiben sichtbar");
+  assert.equal(a.kopfText(), "Synchron", "Sync selbst bleibt heil");
+  a.schliessen();
+});
+
+test("Google-Termine: Trennen entfernt sie auf allen Geraeten", async () => {
+  const { server, a, b } = await zweiGeraete();
+  server.googleTermine = [zeitTermin("g1", "Zahnarzt", 2, 10)];
+  await a.oeffnen();
+  await googleVerbinden(a);
+  a.schliessen();
+  await b.oeffnen();
+  assert.equal(googleZeilen(b).length, 1);
+  b.win.document.getElementById("gTerminTrennen").click();
+  await b.ruhig();
+  assert.equal(googleZeilen(b).length, 0);
+  b.schliessen();
+  await a.oeffnen();
+  assert.equal(googleZeilen(a).length, 0);
+  assert.equal(a.win.document.getElementById("gTerminStart").hidden, false);
+  a.schliessen();
+});
+
+test("Google-Termine: abgemeldet kein Abruf", async () => {
+  const server = new FakeSupabase();
+  const a = new Geraet("Handy", server);
+  await a.oeffnen();
+  assert.equal(a.win.document.getElementById("gTerminStart").hidden, true);
+  assert.equal(server.googleAbrufe || 0, 0);
   a.schliessen();
 });

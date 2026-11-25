@@ -3,6 +3,11 @@
   "private": true,
   "type": "module",
   "description": "Headless-Tests fuer faellig. Liegt bewusst in tests/, damit Netlify kein package.json im Hauptordner sieht.",
-  "scripts": { "test": "node --test --test-concurrency=1 *.test.mjs" },
-  "devDependencies": { "jsdom": "^26.0.0" }
+  "scripts": {
+    "test": "node --test --test-concurrency=1 *.test.mjs"
+  },
+  "devDependencies": {
+    "ical.js": "^2.2.1",
+    "jsdom": "^26.0.0"
+  }
 }
