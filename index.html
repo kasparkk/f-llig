@@ -152,6 +152,34 @@
 
   .head__count[data-urgent="true"] b { color: var(--over); }
 
+  /* Kleiner Sync-Status unter dem Datum; die Flaeche ist groesser als sie aussieht. */
+  .syncpill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 40px;
+    margin: 2px 0 -10px -8px;
+    padding: 0 8px;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--ink-soft);
+    cursor: pointer;
+    border-radius: 8px;
+  }
+  .syncpill[hidden] { display: none; }
+  .syncpill:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+  .syncpill__punkt { width: 8px; height: 8px; border-radius: 50%; background: var(--done); flex: none; }
+  .syncpill[data-zustand="laeuft"] .syncpill__punkt { background: var(--accent); animation: syncpuls 1s ease-in-out infinite alternate; }
+  .syncpill[data-zustand="wartet"] .syncpill__punkt,
+  .syncpill[data-zustand="offline"] .syncpill__punkt { background: var(--today); }
+  .syncpill[data-zustand="fehler"] { color: var(--over); }
+  .syncpill[data-zustand="fehler"] .syncpill__punkt { background: var(--over); }
+  @keyframes syncpuls { from { opacity: 1; } to { opacity: 0.3; } }
+  @media (prefers-reduced-motion: reduce) { .syncpill[data-zustand="laeuft"] .syncpill__punkt { animation: none; } }
+
 
   /* ---------- Anruf-Spickzettel ---------- */
 
@@ -1166,6 +1194,30 @@
 
   .backup + .backup { margin-top: 10px; }
 
+  /* ---------- Sync-Karte ---------- */
+
+  .sync { padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+  .sync__form { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .sync__form[hidden], #syncAus[hidden], #syncAn[hidden] { display: none; }
+  .sync__label { font-size: 0.82rem; font-weight: 600; color: var(--ink-soft); }
+  .sync__input {
+    width: 100%;
+    min-height: 48px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 16px; /* kleiner zoomt iOS beim Antippen */
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .sync__input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn.sync__btn { min-height: 48px; padding: 10px 18px; }
+  .sync__stand { margin: 0 0 6px; display: grid; gap: 6px; }
+  .sync__stand > div { display: grid; grid-template-columns: 5.5em 1fr; gap: 8px; font-size: 0.85rem; }
+  .sync__stand dt { color: var(--ink-faint); }
+  .sync__stand dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+
   .backup__check {
     display: flex;
     align-items: center;
@@ -1356,6 +1408,9 @@
     <div>
       <h1 class="head__title">Fällig</h1>
       <div class="head__date" id="todayLabel">—</div>
+      <button class="syncpill" id="syncKopf" type="button" hidden data-zustand="ruhe">
+        <span class="syncpill__punkt" aria-hidden="true"></span><span id="syncKopfText">Synchron</span>
+      </button>
     </div>
     <div class="head__count" id="headCount" data-urgent="false">
       <b id="countNum">0</b>
@@ -1540,6 +1595,41 @@
     <summary>Sichern &amp; Übertragen</summary>
     <div class="backup__body">
 
+      <div class="backup__block sync" id="syncKarte">
+        <span class="backup__title">Sync zwischen Geräten</span>
+        <div id="syncAus">
+          <span class="backup__hint">
+            Melde dich mit deiner E-Mail an, dann ist auf jedem Gerät alles gleich.
+            Kein Passwort: du bekommst einen Link. Beim ersten Mal kommt alles von hier dazu, nichts wird ersetzt.
+            Ohne Netz läuft die App normal weiter, Änderungen gehen später raus.
+          </span>
+          <form id="syncForm" class="sync__form" novalidate>
+            <label class="sync__label" for="syncMail">E-Mail</label>
+            <input class="sync__input" id="syncMail" type="email" inputmode="email" autocomplete="email"
+                   enterkeyhint="send" autocapitalize="off" spellcheck="false" placeholder="name@beispiel.de" />
+            <button class="btn btn--primary sync__btn" id="syncLink" type="submit">Anmeldelink schicken</button>
+          </form>
+          <form id="syncCodeForm" class="sync__form" hidden novalidate>
+            <label class="sync__label" for="syncCode">Steht in der Mail ein Code? Dann hier eintippen</label>
+            <input class="sync__input" id="syncCode" type="text" inputmode="numeric" autocomplete="one-time-code"
+                   enterkeyhint="done" maxlength="10" />
+            <button class="btn sync__btn" type="submit">Code bestätigen</button>
+          </form>
+        </div>
+        <div id="syncAn" hidden>
+          <dl class="sync__stand">
+            <div><dt>Konto</dt><dd id="syncKonto"></dd></div>
+            <div><dt>Zuletzt</dt><dd id="syncZuletzt"></dd></div>
+            <div><dt>Stand</dt><dd id="syncAnzahl"></dd></div>
+          </dl>
+          <div class="backup__row">
+            <button class="btn btn--primary sync__btn" id="syncJetzt" type="button">Jetzt syncen</button>
+            <button class="btn sync__btn" id="syncAb" type="button">Abmelden</button>
+          </div>
+        </div>
+        <span class="backup__msg" id="syncMsg" role="status" aria-live="polite"></span>
+      </div>
+
       <div class="backup__block">
         <span class="backup__title">Sichern</span>
         <span class="backup__hint">
@@ -1620,7 +1710,7 @@
   </details>
 
   <p class="foot">
-    Alles bleibt in diesem Browser gespeichert — nichts wird hochgeladen.
+    <span id="fussText">Alles bleibt in diesem Browser gespeichert — nichts wird hochgeladen.</span>
     Lege dir den Link auf den Startbildschirm, dann ist alles immer griffbereit.
     <br><span class="foot__fassung" id="fassung"></span>
   </p>
@@ -1632,7 +1722,7 @@
 
   // Wird bei jeder Veroeffentlichung hochgezaehlt. Steht unten in der
   // Fusszeile, damit man eine haengengebliebene alte Fassung sofort erkennt.
-  var FASSUNG = "25.11.2026";
+  var FASSUNG = "25.11.2026 Sync";
 
   var STORAGE_KEY = "faellig-aufgaben-v1";
   var SETTINGS_KEY = "faellig-einstellungen-v1";
@@ -1648,6 +1738,7 @@
 
   function saveSettings(o) {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(o)); } catch (e) {}
+    nachLokalemSpeichern();
   }
 
   var settings = loadSettings();
@@ -2288,6 +2379,7 @@
 
   function save(items) {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); } catch (e) {}
+    nachLokalemSpeichern();
   }
 
   var items = load();
@@ -3276,6 +3368,7 @@
 
   function saveVorlagen() {
     try { localStorage.setItem(VORLAGEN_KEY, JSON.stringify(eigene)); } catch (e) {}
+    nachLokalemSpeichern();
   }
 
   var eigene = loadVorlagen();
@@ -4225,6 +4318,7 @@
 
   function saveNotes() {
     try { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)); } catch (e) {}
+    nachLokalemSpeichern();
   }
 
   var notes = loadNotes();
@@ -4289,6 +4383,7 @@
 
   function saveEnt() {
     try { localStorage.setItem(ENT_KEY, JSON.stringify(entscheidungen)); } catch (e) {}
+    nachLokalemSpeichern();
   }
 
   var entscheidungen = loadEnt();
@@ -5352,6 +5447,685 @@
     addForm.addEventListener("submit", function () { banner.hidden = true; });
     setTimeout(function () { addInput.focus(); }, 50);
   })();
+
+  /* ======================= Sync (Supabase) ======================= */
+  // Gleicht alles ueber ein Konto zwischen Geraeten ab. Lokal wird immer sofort
+  // gespeichert, der Sync laeuft hinterher; ohne Netz warten Aenderungen und
+  // gehen spaeter raus. Pro Eintrag gewinnt die neueste Aenderung. Geloeschtes
+  // wird als Grabstein weitergegeben, sonst kaeme es vom anderen Geraet zurueck.
+  // Kein supabase-js: ein fremdes Skript wuerde offline fehlen, fetch reicht.
+
+  var SYNC_URL = "https://xrrcuapiugwgqxxatkiq.supabase.co";
+  var SYNC_KEY = "sb_publishable_kcP8-40mEnwPGuFwVGigKA_b5swelLm"; // oeffentlich gedacht; Schutz kommt von RLS
+  var SYNC_META_KEY = "faellig-sync-v1";
+  var EINST_ID = "einstellungen";
+  var ZEITLIMIT_MS = 20000;
+  var UEBERLAPPUNG_MS = 120000; // beim Nachholen etwas zurueckgreifen, damit nichts durchrutscht
+  var PAKET_GROESSE = 400;
+
+  var syncBereit = false;
+
+  function listenSammlung(holen, setzen, speichern) {
+    return {
+      eintraege: function () {
+        var m = {};
+        holen().forEach(function (x) { if (x && typeof x.id === "string" && x.id) m[x.id] = x; });
+        return m;
+      },
+      uebernehmen: function (id, wert) {
+        var a = holen();
+        var i = -1;
+        for (var j = 0; j < a.length; j++) if (a[j] && a[j].id === id) { i = j; break; }
+        if (wert === null) { if (i >= 0) setzen(a.filter(function (x) { return !x || x.id !== id; })); }
+        else if (i >= 0) a[i] = wert;
+        else a.push(wert);
+      },
+      gueltig: function (id, wert) {
+        return !!wert && typeof wert === "object" && !Array.isArray(wert) && wert.id === id;
+      },
+      speichern: speichern,
+    };
+  }
+
+  var SAMMLUNGEN = {
+    aufgaben: listenSammlung(function () { return items; }, function (a) { items = a; }, function () { save(items); }),
+    notizen: listenSammlung(function () { return notes; }, function (a) { notes = a; }, function () {
+      notes.sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+      saveNotes();
+    }),
+    vorlagen: listenSammlung(function () { return eigene; }, function (a) { eigene = a; }, function () { saveVorlagen(); }),
+    entscheidungen: listenSammlung(function () { return entscheidungen; }, function (a) { entscheidungen = a; }, function () {
+      if (entOffen && !entscheidungen.some(function (e) { return e.id === entOffen; })) entOffen = null;
+      saveEnt();
+    }),
+    einstellungen: {
+      eintraege: function () { var m = {}; m[EINST_ID] = settings; return m; },
+      uebernehmen: function (id, wert) {
+        if (!wert) return;
+        Object.keys(settings).forEach(function (k) { delete settings[k]; });
+        Object.keys(wert).forEach(function (k) { settings[k] = wert[k]; });
+      },
+      gueltig: function (id, wert) {
+        return id === EINST_ID && !!wert && typeof wert === "object" && !Array.isArray(wert);
+      },
+      speichern: function () { saveSettings(settings); },
+    },
+  };
+
+  /* ---------- Merkzettel des Syncs ---------- */
+  // stand:  "sammlung|id" -> { h: Streuwert des Inhalts, t: Zeitpunkt der letzten Aenderung }
+  // tote:   "sammlung|id" -> Zeitpunkt des Loeschens (Grabstein)
+  // offen:  "sammlung|id" -> true, solange noch nicht hochgeladen
+
+  function metaLaden() {
+    var o = null;
+    try { o = JSON.parse(localStorage.getItem(SYNC_META_KEY) || "null"); } catch (e) { o = null; }
+    if (!o || typeof o !== "object") o = {};
+    if (!o.stand || typeof o.stand !== "object") o.stand = {};
+    if (!o.tote || typeof o.tote !== "object") o.tote = {};
+    if (!o.offen || typeof o.offen !== "object") o.offen = {};
+    if (!o.konto || typeof o.konto !== "object") o.konto = null;
+    return o;
+  }
+
+  var meta = metaLaden();
+  var syncSpeicherVoll = false;
+
+  function metaSpeichern() {
+    try { localStorage.setItem(SYNC_META_KEY, JSON.stringify(meta)); syncSpeicherVoll = false; }
+    catch (e) { syncSpeicherVoll = true; }
+  }
+
+  function schluessel(s, id) { return s + "|" + id; }
+  function zerlegen(k) { var i = k.indexOf("|"); return { s: k.slice(0, i), id: k.slice(i + 1) }; }
+
+  // Gleiche Inhalte muessen gleich aussehen, auch wenn der Server die Felder
+  // anders sortiert zurueckgibt. Deshalb Felder sortiert in Text verwandeln.
+  function kanonisch(v) {
+    if (v === null || typeof v !== "object") return JSON.stringify(v === undefined ? null : v);
+    if (Array.isArray(v)) return "[" + v.map(kanonisch).join(",") + "]";
+    return "{" + Object.keys(v).sort().filter(function (k) { return v[k] !== undefined; })
+      .map(function (k) { return JSON.stringify(k) + ":" + kanonisch(v[k]); }).join(",") + "}";
+  }
+
+  function streuwert(text) {
+    // cyrb53: schnell, gut genug, um Aenderungen zu erkennen
+    var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (var i = 0; i < text.length; i++) {
+      var c = text.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 2654435761);
+      h2 = Math.imul(h2 ^ c, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+  }
+
+  function inhaltWert(obj) { return streuwert(kanonisch(obj)); }
+
+  // Vergleicht den aktuellen Stand mit dem gemerkten und merkt sich, was sich
+  // geaendert hat. Beim allerersten Mal bekommt alles den Zeitpunkt 0: ist
+  // derselbe Eintrag schon im Konto, gewinnt dann die Fassung im Konto.
+  function aenderungenErfassen() {
+    var jetzt = Date.now();
+    var ersterLauf = !meta.grundstand;
+    var geaendert = false;
+    var gesehen = {};
+    Object.keys(SAMMLUNGEN).forEach(function (s) {
+      var m = SAMMLUNGEN[s].eintraege();
+      Object.keys(m).forEach(function (id) {
+        var k = schluessel(s, id);
+        gesehen[k] = true;
+        var h = inhaltWert(m[id]);
+        var alt = meta.stand[k];
+        if (alt && alt.h === h) return;
+        meta.stand[k] = { h: h, t: ersterLauf ? 0 : jetzt };
+        delete meta.tote[k];
+        meta.offen[k] = true;
+        geaendert = true;
+      });
+    });
+    Object.keys(meta.stand).forEach(function (k) {
+      if (gesehen[k]) return;
+      delete meta.stand[k];
+      meta.tote[k] = jetzt;
+      meta.offen[k] = true;
+      geaendert = true;
+    });
+    if (ersterLauf) { meta.grundstand = true; geaendert = true; }
+    if (geaendert) metaSpeichern();
+    return geaendert;
+  }
+
+  var erfassTimer = null;
+  // Wird von allen Speicher-Funktionen aufgerufen.
+  function nachLokalemSpeichern() {
+    if (!syncBereit) return;
+    clearTimeout(erfassTimer);
+    erfassTimer = setTimeout(function () {
+      if (aenderungenErfassen()) { syncAnzeigen(); syncBald(1500); }
+    }, 300);
+  }
+
+  /* ---------- Verbindung zum Server ---------- */
+
+  function SyncFehler(art, text) { this.art = art; this.message = text; }
+
+  function anfrage(pfad, methode, koerper, token, extraKopf) {
+    var kopf = { apikey: SYNC_KEY, "Content-Type": "application/json" };
+    if (token) kopf.Authorization = "Bearer " + token;
+    if (extraKopf) Object.keys(extraKopf).forEach(function (k) { kopf[k] = extraKopf[k]; });
+    var abbruch = typeof AbortController === "function" ? new AbortController() : null;
+    var uhr = abbruch ? setTimeout(function () { abbruch.abort(); }, ZEITLIMIT_MS) : null;
+    return fetch(SYNC_URL + pfad, {
+      method: methode,
+      headers: kopf,
+      body: koerper === undefined ? undefined : JSON.stringify(koerper),
+      signal: abbruch ? abbruch.signal : undefined,
+      cache: "no-store",
+    }).then(function (res) {
+      clearTimeout(uhr);
+      return res.text().then(function (t) {
+        var j = null;
+        try { j = t ? JSON.parse(t) : null; } catch (e) { j = null; }
+        return { status: res.status, ok: res.ok, json: j };
+      });
+    }, function () {
+      clearTimeout(uhr);
+      throw new SyncFehler("netz", "Keine Verbindung.");
+    });
+  }
+
+  function serverText(r) {
+    var j = r.json || {};
+    return j.msg || j.message || j.error_description || j.error || ("Fehler " + r.status);
+  }
+
+  function jwtInhalt(token) {
+    try {
+      var teil = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+      while (teil.length % 4) teil += "=";
+      return JSON.parse(decodeURIComponent(escape(atob(teil))));
+    } catch (e) { return {}; }
+  }
+
+  function sitzungMerken(j) {
+    var inhalt = jwtInhalt(j.access_token);
+    var ablauf = j.expires_at ? Number(j.expires_at) * 1000
+      : Date.now() + (Number(j.expires_in) || 3600) * 1000;
+    meta.konto = {
+      email: (j.user && j.user.email) || inhalt.email || (meta.konto && meta.konto.email) || "",
+      uid: inhalt.sub || (j.user && j.user.id) || "",
+      access: j.access_token,
+      refresh: j.refresh_token || (meta.konto && meta.konto.refresh) || "",
+      ablauf: ablauf,
+    };
+    metaSpeichern();
+  }
+
+  var erneuerung = null;
+  function zugangHolen(erzwingen) {
+    if (!meta.konto) return Promise.reject(new SyncFehler("abgemeldet", "Nicht angemeldet."));
+    if (!erzwingen && meta.konto.access && meta.konto.ablauf - 60000 > Date.now()) {
+      return Promise.resolve(meta.konto.access);
+    }
+    if (erneuerung) return erneuerung;
+    erneuerung = anfrage("/auth/v1/token?grant_type=refresh_token", "POST", { refresh_token: meta.konto.refresh })
+      .then(function (r) {
+        if (r.status === 400 || r.status === 401 || r.status === 403) {
+          throw new SyncFehler("abgemeldet", "Anmeldung abgelaufen. Bitte neu anmelden.");
+        }
+        if (!r.ok || !r.json || !r.json.access_token) throw new SyncFehler("server", serverText(r));
+        sitzungMerken(r.json);
+        return meta.konto.access;
+      });
+    erneuerung.then(function () { erneuerung = null; }, function () { erneuerung = null; });
+    return erneuerung;
+  }
+
+  // Ein abgelaufenes Token zeigt sich manchmal erst beim Server: dann einmal erneuern.
+  function mitZugang(machen) {
+    return zugangHolen(false).then(function (t) {
+      return machen(t).then(function (r) {
+        if (r.status !== 401) return r;
+        return zugangHolen(true).then(machen);
+      });
+    });
+  }
+
+  /* ---------- Abgleich ---------- */
+
+  function fernUebernehmen(zeilen, geaendert) {
+    zeilen.forEach(function (z) {
+      var s = SAMMLUNGEN[z.sammlung];
+      if (!s || typeof z.eintrag_id !== "string") return;
+      var id = z.eintrag_id;
+      var k = schluessel(z.sammlung, id);
+      var fernT = Number(z.geaendert_am);
+      if (!isFinite(fernT)) return;
+      var lokalT = meta.stand[k] ? meta.stand[k].t : (k in meta.tote ? meta.tote[k] : null);
+
+      if (lokalT !== null && fernT < lokalT) { meta.offen[k] = true; return; }
+
+      if (lokalT !== null && fernT === lokalT) {
+        var gleich = z.geloescht ? (k in meta.tote)
+          : (!!meta.stand[k] && meta.stand[k].h === inhaltWert(z.daten));
+        if (gleich) { delete meta.offen[k]; return; }
+        // Gleich alt, aber verschieden: die Fassung im Konto gilt, damit alle Geraete dasselbe sehen.
+      }
+
+      if (z.geloescht) {
+        s.uebernehmen(id, null);
+        delete meta.stand[k];
+        meta.tote[k] = fernT;
+      } else {
+        if (!s.gueltig(id, z.daten)) return;
+        s.uebernehmen(id, z.daten);
+        meta.stand[k] = { h: inhaltWert(z.daten), t: fernT };
+        delete meta.tote[k];
+      }
+      delete meta.offen[k];
+      geaendert[z.sammlung] = true;
+    });
+  }
+
+  function holen(token, geaendert) {
+    var ab = meta.cursor;
+    var neuesterServerAm = null;
+    var SEITE = 1000;
+    function seite(versatz) {
+      var q = "/rest/v1/faellig_daten?select=sammlung,eintrag_id,daten,geaendert_am,geloescht,server_am" +
+        "&order=server_am.asc,sammlung.asc,eintrag_id.asc&limit=" + SEITE + "&offset=" + versatz;
+      if (ab) q += "&server_am=gt." + encodeURIComponent(ab);
+      return mitZugang(function (t) { return anfrage(q, "GET", undefined, t); }).then(function (r) {
+        if (!r.ok || !Array.isArray(r.json)) throw new SyncFehler("server", "Laden: " + serverText(r));
+        fernUebernehmen(r.json, geaendert);
+        r.json.forEach(function (z) {
+          if (z.server_am && (!neuesterServerAm || Date.parse(z.server_am) > Date.parse(neuesterServerAm))) {
+            neuesterServerAm = z.server_am;
+          }
+        });
+        if (r.json.length === SEITE) return seite(versatz + SEITE);
+      });
+    }
+    return seite(0).then(function () {
+      if (neuesterServerAm) {
+        var c = new Date(Date.parse(neuesterServerAm) - UEBERLAPPUNG_MS).toISOString();
+        if (!meta.cursor || Date.parse(c) > Date.parse(meta.cursor)) meta.cursor = c;
+      }
+      metaSpeichern();
+    });
+  }
+
+  function hochladen() {
+    var keys = Object.keys(meta.offen);
+    if (!keys.length) return Promise.resolve();
+    var karten = {};
+    Object.keys(SAMMLUNGEN).forEach(function (s) { karten[s] = SAMMLUNGEN[s].eintraege(); });
+    var gesendet = {};
+    var zeilen = [];
+    keys.slice(0, PAKET_GROESSE).forEach(function (k) {
+      var teil = zerlegen(k);
+      if (!SAMMLUNGEN[teil.s]) { delete meta.offen[k]; return; }
+      var obj = karten[teil.s][teil.id];
+      if (meta.stand[k] && obj) {
+        zeilen.push({ sammlung: teil.s, eintrag_id: teil.id, daten: obj, geaendert_am: meta.stand[k].t, geloescht: false });
+        gesendet[k] = meta.stand[k].t;
+      } else if (k in meta.tote) {
+        zeilen.push({ sammlung: teil.s, eintrag_id: teil.id, geaendert_am: meta.tote[k], geloescht: true });
+        gesendet[k] = meta.tote[k];
+      } else {
+        delete meta.offen[k];
+      }
+    });
+    if (!zeilen.length) { metaSpeichern(); return hochladen(); }
+    return mitZugang(function (t) {
+      return anfrage("/rest/v1/rpc/faellig_hochladen", "POST", { zeilen: zeilen }, t);
+    }).then(function (r) {
+      if (!r.ok) throw new SyncFehler("server", "Hochladen: " + serverText(r));
+      // Nur abhaken, was sich waehrenddessen nicht wieder geaendert hat.
+      Object.keys(gesendet).forEach(function (k) {
+        var jetztT = meta.stand[k] ? meta.stand[k].t : meta.tote[k];
+        if (jetztT === gesendet[k]) delete meta.offen[k];
+      });
+      metaSpeichern();
+      if (Object.keys(meta.offen).length && keys.length > PAKET_GROESSE) return hochladen();
+    });
+  }
+
+  /* ---------- Ablauf ---------- */
+
+  var syncZustand = "ruhe"; // ruhe | laeuft | offline | fehler
+  var syncFehlerText = "";
+  var syncLauf = null;
+  var syncNochmal = false;
+  var syncTimer = null;
+  var neuZeichnenWartet = false;
+
+  function syncBald(ms) {
+    if (!meta.konto) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(syncJetzt, ms || 0);
+  }
+
+  function syncJetzt() {
+    if (!meta.konto) return Promise.resolve();
+    if (syncLauf) { syncNochmal = true; return syncLauf; }
+    clearTimeout(syncTimer);
+    aenderungenErfassen();
+    if (navigator.onLine === false) {
+      syncZustand = "offline";
+      syncAnzeigen();
+      return Promise.resolve();
+    }
+    syncZustand = "laeuft";
+    syncAnzeigen();
+    var geaendert = {};
+    syncLauf = zugangHolen(false)
+      .then(function () { return holen(null, geaendert); })
+      .then(function () { return hochladen(); })
+      .then(function () {
+        meta.zuletzt = Date.now();
+        metaSpeichern();
+        syncZustand = "ruhe";
+        syncFehlerText = "";
+      }, function (e) {
+        if (e && e.art === "netz") {
+          syncZustand = "offline";
+          syncFehlerText = "";
+        } else if (e && e.art === "abgemeldet") {
+          meta.konto = null;
+          meta.cursor = null;
+          metaSpeichern();
+          syncZustand = "fehler";
+          syncFehlerText = e.message;
+        } else {
+          syncZustand = "fehler";
+          syncFehlerText = "Sync hat nicht geklappt: " + ((e && e.message) || "unbekannter Fehler") +
+            ". Deine Daten sind hier sicher gespeichert.";
+        }
+      })
+      .then(function () {
+        var namen = Object.keys(geaendert);
+        if (namen.length) {
+          namen.forEach(function (s) { SAMMLUNGEN[s].speichern(); });
+          neuZeichnen();
+        }
+        syncLauf = null;
+        syncAnzeigen();
+        if (syncNochmal) { syncNochmal = false; syncBald(300); }
+      });
+    return syncLauf;
+  }
+
+  // Waehrend jemand tippt, nicht die Listen unter den Fingern austauschen.
+  function wirdGeradeBearbeitet() {
+    var a = document.activeElement;
+    if (!a || !/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return false;
+    if (a === addInput) return false;
+    if (backupEl.contains(a)) return false;
+    return true;
+  }
+
+  function neuZeichnen() {
+    if (wirdGeradeBearbeitet()) {
+      if (!neuZeichnenWartet) {
+        neuZeichnenWartet = true;
+        document.addEventListener("focusout", function warten() {
+          setTimeout(function () {
+            if (wirdGeradeBearbeitet()) return;
+            document.removeEventListener("focusout", warten);
+            neuZeichnenWartet = false;
+            allesNeuZeichnen();
+            renderGoogleListe();
+          }, 0);
+        });
+      }
+      return;
+    }
+    allesNeuZeichnen();
+    renderGoogleListe();
+    if (backupEl.open) expFuellen();
+  }
+
+  /* ---------- Anzeige ---------- */
+
+  var syncKopfEl = document.getElementById("syncKopf");
+  var syncKopfText = document.getElementById("syncKopfText");
+  var syncAusEl = document.getElementById("syncAus");
+  var syncAnEl = document.getElementById("syncAn");
+  var syncMsgEl = document.getElementById("syncMsg");
+  var syncMailEl = document.getElementById("syncMail");
+  var syncCodeBox = document.getElementById("syncCodeForm");
+  var syncCodeEl = document.getElementById("syncCode");
+  var syncKontoEl = document.getElementById("syncKonto");
+  var syncZuletztEl = document.getElementById("syncZuletzt");
+  var syncAnzahlEl = document.getElementById("syncAnzahl");
+  var syncJetztBtn = document.getElementById("syncJetzt");
+  var fussTextEl = document.getElementById("fussText");
+  var FUSS_LOKAL = fussTextEl ? fussTextEl.textContent : "";
+
+  function anzahlOffen() { return Object.keys(meta.offen).length; }
+
+  function anzahlSynchron() {
+    var n = 0;
+    Object.keys(meta.stand).forEach(function (k) {
+      if (k.indexOf("einstellungen|") !== 0 && !meta.offen[k]) n++;
+    });
+    return n;
+  }
+
+  function zeitText(ms) {
+    if (!ms) return "noch nie";
+    var d = new Date(ms);
+    var uhr = (d.getHours() < 10 ? "0" : "") + d.getHours() + ":" + (d.getMinutes() < 10 ? "0" : "") + d.getMinutes();
+    var heute = new Date(); heute.setHours(0, 0, 0, 0);
+    var tag = new Date(d); tag.setHours(0, 0, 0, 0);
+    var diff = Math.round((heute - tag) / 86400000);
+    if (diff === 0) return "heute " + uhr;
+    if (diff === 1) return "gestern " + uhr;
+    return d.getDate() + "." + (d.getMonth() + 1) + "." + d.getFullYear() + " " + uhr;
+  }
+
+  function syncAnzeigen() {
+    var offen = anzahlOffen();
+    var angemeldet = !!meta.konto;
+
+    // Kopfzeile
+    if (!angemeldet) {
+      syncKopfEl.hidden = !(syncZustand === "fehler" && syncFehlerText);
+      syncKopfEl.dataset.zustand = "fehler";
+      syncKopfText.textContent = "Abgemeldet";
+    } else {
+      syncKopfEl.hidden = false;
+      var z = syncZustand, t;
+      if (z === "laeuft") t = "Sync läuft";
+      else if (z === "offline") t = offen ? "Offline · " + offen + " wartet" : "Offline";
+      else if (z === "fehler") t = "Sync-Fehler";
+      else if (offen) { z = "wartet"; t = offen + " wartet"; }
+      else t = "Synchron";
+      syncKopfEl.dataset.zustand = z;
+      syncKopfText.textContent = t;
+    }
+    syncKopfEl.setAttribute("aria-label", "Sync: " + syncKopfText.textContent + ". Tippen für Details.");
+
+    // Karte
+    syncAusEl.hidden = angemeldet;
+    syncAnEl.hidden = !angemeldet;
+    if (angemeldet) {
+      syncKontoEl.textContent = meta.konto.email || "angemeldet";
+      syncZuletztEl.textContent = zeitText(meta.zuletzt);
+      var synchron = anzahlSynchron();
+      syncAnzahlEl.textContent = synchron + (synchron === 1 ? " Eintrag" : " Einträge") + " im Konto" +
+        (offen ? " · " + offen + " noch nicht hochgeladen" : "");
+      syncJetztBtn.disabled = syncZustand === "laeuft";
+      syncJetztBtn.textContent = syncZustand === "laeuft" ? "Synct …" : "Jetzt syncen";
+    }
+
+    if (syncZustand === "fehler" && syncFehlerText) meldung(syncMsgEl, syncFehlerText, false);
+    else if (angemeldet && syncZustand === "offline") {
+      meldung(syncMsgEl, "Gerade kein Netz. Änderungen bleiben hier gespeichert und gehen raus, sobald du wieder online bist.", null);
+    } else if (angemeldet && syncSpeicherVoll) meldung(syncMsgEl, "Der Speicher dieses Browsers ist voll. Sync kann sich nicht merken, was offen ist.", false);
+    else if (angemeldet && syncMsgEl.getAttribute("data-ok") === "false") meldung(syncMsgEl, "");
+
+    if (fussTextEl) {
+      fussTextEl.textContent = angemeldet
+        ? "Alles ist in diesem Browser gespeichert und wird über dein Konto mit deinen anderen Geräten abgeglichen."
+        : FUSS_LOKAL;
+    }
+  }
+
+  syncKopfEl.addEventListener("click", function () {
+    backupEl.open = true;
+    var karte = document.getElementById("syncKarte");
+    setTimeout(function () { karte.scrollIntoView({ block: "start", behavior: "smooth" }); }, 30);
+    if (meta.konto && syncZustand !== "laeuft") syncJetzt();
+  });
+
+  /* ---------- Anmelden ---------- */
+
+  var gesendetAn = "";
+
+  function anmeldungAbschliessen(sitzung) {
+    var vorherUid = meta.konto && meta.konto.uid;
+    sitzungMerken(sitzung);
+    // Nach jeder Anmeldung einmal alles abgleichen: alles vom Konto holen,
+    // alles von hier hochschicken. Der Server behaelt pro Eintrag das Neueste.
+    meta.cursor = null;
+    Object.keys(meta.stand).forEach(function (k) { meta.offen[k] = true; });
+    Object.keys(meta.tote).forEach(function (k) { meta.offen[k] = true; });
+    if (vorherUid && vorherUid !== meta.konto.uid) meta.zuletzt = null;
+    metaSpeichern();
+    syncZustand = "ruhe";
+    syncFehlerText = "";
+    meldung(syncMsgEl, "Angemeldet als " + (meta.konto.email || "dein Konto") + ".", true);
+    syncCodeBox.hidden = true;
+    syncAnzeigen();
+    syncJetzt();
+  }
+
+  // Der Anmeldelink fuehrt zurueck hierher, mit der Sitzung hinter dem #.
+  function linkAuswerten() {
+    var h = window.location.hash || "";
+    if (!/(^#|&)(access_token|error|error_description)=/.test(h)) return;
+    var p;
+    try { p = new URLSearchParams(h.slice(1)); } catch (e) { return; }
+    try { history.replaceState(null, "", window.location.pathname + window.location.search); } catch (e) {}
+    backupEl.open = true;
+    if (p.get("access_token")) {
+      anmeldungAbschliessen({
+        access_token: p.get("access_token"),
+        refresh_token: p.get("refresh_token"),
+        expires_in: p.get("expires_in"),
+        expires_at: p.get("expires_at"),
+      });
+    } else {
+      var abgelaufen = /expired|invalid/i.test((p.get("error_code") || "") + (p.get("error_description") || ""));
+      syncZustand = "fehler";
+      syncFehlerText = abgelaufen
+        ? "Der Anmeldelink ist abgelaufen oder schon benutzt. Fordere einfach einen neuen an."
+        : "Anmeldung hat nicht geklappt: " + (p.get("error_description") || p.get("error"));
+    }
+  }
+
+  document.getElementById("syncForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var mail = syncMailEl.value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+      meldung(syncMsgEl, "Das sieht nicht nach einer E-Mail-Adresse aus.", false);
+      syncMailEl.focus();
+      return;
+    }
+    var knopf = document.getElementById("syncLink");
+    knopf.disabled = true;
+    meldung(syncMsgEl, "Schicke Link …", null);
+    var zurueck = window.location.origin + window.location.pathname;
+    anfrage("/auth/v1/otp?redirect_to=" + encodeURIComponent(zurueck), "POST", { email: mail, create_user: true })
+      .then(function (r) {
+        if (r.status === 429) throw new SyncFehler("server", "Gerade wurden zu viele Anmeldemails verschickt. Probier es in ein paar Minuten nochmal.");
+        if (!r.ok) throw new SyncFehler("server", serverText(r));
+        gesendetAn = mail;
+        syncZustand = "ruhe";
+        syncFehlerText = "";
+        meldung(syncMsgEl, "Link ist unterwegs an " + mail + ". Öffne ihn auf diesem Gerät, im selben Browser.", true);
+        syncCodeBox.hidden = false;
+      }, function (e) { throw e.art ? e : new SyncFehler("netz", "Keine Verbindung."); })
+      .catch(function (e) {
+        meldung(syncMsgEl, e.art === "netz" ? "Keine Verbindung. Zum Anmelden brauchst du kurz Internet." : e.message, false);
+      })
+      .then(function () { knopf.disabled = false; });
+  });
+
+  // Fuer das iPhone: ein Link aus der Mail oeffnet Safari, nicht die installierte
+  // App. Steht in der Mail ein Code, kann man ihn hier eintippen.
+  document.getElementById("syncCodeForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var code = syncCodeEl.value.replace(/\s+/g, "");
+    if (!gesendetAn || !/^\d{6,10}$/.test(code)) {
+      meldung(syncMsgEl, "Der Code besteht nur aus Ziffern (6 bis 10 Stellen).", false);
+      return;
+    }
+    anfrage("/auth/v1/verify", "POST", { type: "email", email: gesendetAn, token: code })
+      .then(function (r) {
+        if (!r.ok || !r.json || !r.json.access_token) throw new SyncFehler("server", "Code passt nicht oder ist abgelaufen.");
+        syncCodeEl.value = "";
+        anmeldungAbschliessen(r.json);
+      })
+      .catch(function (e) {
+        meldung(syncMsgEl, e.art === "netz" ? "Keine Verbindung." : e.message, false);
+      });
+  });
+
+  syncJetztBtn.addEventListener("click", function () { syncJetzt(); });
+
+  document.getElementById("syncAb").addEventListener("click", function () {
+    aenderungenErfassen();
+    var offen = anzahlOffen();
+    var frage = offen
+      ? offen + (offen === 1 ? " Änderung ist" : " Änderungen sind") + " noch nicht hochgeladen. Trotzdem abmelden?\n\nAuf diesem Gerät bleibt alles erhalten."
+      : "Abmelden?\n\nAuf diesem Gerät bleibt alles erhalten, es wird nur nicht mehr abgeglichen.";
+    if (!confirm(frage)) return;
+    var token = meta.konto && meta.konto.access;
+    if (token) anfrage("/auth/v1/logout", "POST", undefined, token).catch(function () {});
+    meta.konto = null;
+    meta.cursor = null;
+    meta.zuletzt = null;
+    metaSpeichern();
+    syncZustand = "ruhe";
+    syncFehlerText = "";
+    meldung(syncMsgEl, "Abgemeldet. Deine Daten bleiben auf diesem Gerät.", true);
+    syncAnzeigen();
+  });
+
+  /* ---------- Ausloeser ---------- */
+
+  // Falls der Link in einem schon offenen Tab landet, laedt die Seite nicht neu.
+  window.addEventListener("hashchange", function () { linkAuswerten(); syncAnzeigen(); });
+  window.addEventListener("online", function () { syncBald(500); });
+  window.addEventListener("offline", function () {
+    if (meta.konto && syncZustand !== "laeuft") { syncZustand = "offline"; syncAnzeigen(); }
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") syncBald(300);
+  });
+  setInterval(function () {
+    if (document.visibilityState === "visible") syncBald(0);
+  }, 120000);
+  // Ein anderer Tab hat angemeldet, abgemeldet oder gesynct.
+  window.addEventListener("storage", function (ev) {
+    if (ev.key !== SYNC_META_KEY) return;
+    meta = metaLaden();
+    syncAnzeigen();
+  });
+
+  backupEl.addEventListener("toggle", function () { if (backupEl.open) syncAnzeigen(); });
+
+  aenderungenErfassen();
+  syncBereit = true;
+  linkAuswerten();
+  syncAnzeigen();
+  if (meta.konto) syncBald(400);
+
 
   refreshPreview();
   render();
