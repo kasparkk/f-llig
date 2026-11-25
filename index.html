@@ -1609,12 +1609,6 @@
                    enterkeyhint="send" autocapitalize="off" spellcheck="false" placeholder="name@beispiel.de" />
             <button class="btn btn--primary sync__btn" id="syncLink" type="submit">Anmeldelink schicken</button>
           </form>
-          <form id="syncCodeForm" class="sync__form" hidden novalidate>
-            <label class="sync__label" for="syncCode">Steht in der Mail ein Code? Dann hier eintippen</label>
-            <input class="sync__input" id="syncCode" type="text" inputmode="numeric" autocomplete="one-time-code"
-                   enterkeyhint="done" maxlength="10" />
-            <button class="btn sync__btn" type="submit">Code bestätigen</button>
-          </form>
         </div>
         <div id="syncAn" hidden>
           <dl class="sync__stand">
@@ -5896,8 +5890,6 @@
   var syncAnEl = document.getElementById("syncAn");
   var syncMsgEl = document.getElementById("syncMsg");
   var syncMailEl = document.getElementById("syncMail");
-  var syncCodeBox = document.getElementById("syncCodeForm");
-  var syncCodeEl = document.getElementById("syncCode");
   var syncKontoEl = document.getElementById("syncKonto");
   var syncZuletztEl = document.getElementById("syncZuletzt");
   var syncAnzahlEl = document.getElementById("syncAnzahl");
@@ -5984,8 +5976,6 @@
 
   /* ---------- Anmelden ---------- */
 
-  var gesendetAn = "";
-
   function anmeldungAbschliessen(sitzung) {
     var vorherUid = meta.konto && meta.konto.uid;
     sitzungMerken(sitzung);
@@ -5999,7 +5989,6 @@
     syncZustand = "ruhe";
     syncFehlerText = "";
     meldung(syncMsgEl, "Angemeldet als " + (meta.konto.email || "dein Konto") + ".", true);
-    syncCodeBox.hidden = true;
     syncAnzeigen();
     syncJetzt();
   }
@@ -6044,36 +6033,14 @@
       .then(function (r) {
         if (r.status === 429) throw new SyncFehler("server", "Gerade wurden zu viele Anmeldemails verschickt. Probier es in ein paar Minuten nochmal.");
         if (!r.ok) throw new SyncFehler("server", serverText(r));
-        gesendetAn = mail;
         syncZustand = "ruhe";
         syncFehlerText = "";
         meldung(syncMsgEl, "Link ist unterwegs an " + mail + ". Öffne ihn auf diesem Gerät, im selben Browser.", true);
-        syncCodeBox.hidden = false;
       }, function (e) { throw e.art ? e : new SyncFehler("netz", "Keine Verbindung."); })
       .catch(function (e) {
         meldung(syncMsgEl, e.art === "netz" ? "Keine Verbindung. Zum Anmelden brauchst du kurz Internet." : e.message, false);
       })
       .then(function () { knopf.disabled = false; });
-  });
-
-  // Fuer das iPhone: ein Link aus der Mail oeffnet Safari, nicht die installierte
-  // App. Steht in der Mail ein Code, kann man ihn hier eintippen.
-  document.getElementById("syncCodeForm").addEventListener("submit", function (ev) {
-    ev.preventDefault();
-    var code = syncCodeEl.value.replace(/\s+/g, "");
-    if (!gesendetAn || !/^\d{6,10}$/.test(code)) {
-      meldung(syncMsgEl, "Der Code besteht nur aus Ziffern (6 bis 10 Stellen).", false);
-      return;
-    }
-    anfrage("/auth/v1/verify", "POST", { type: "email", email: gesendetAn, token: code })
-      .then(function (r) {
-        if (!r.ok || !r.json || !r.json.access_token) throw new SyncFehler("server", "Code passt nicht oder ist abgelaufen.");
-        syncCodeEl.value = "";
-        anmeldungAbschliessen(r.json);
-      })
-      .catch(function (e) {
-        meldung(syncMsgEl, e.art === "netz" ? "Keine Verbindung." : e.message, false);
-      });
   });
 
   syncJetztBtn.addEventListener("click", function () { syncJetzt(); });
