@@ -41,6 +41,8 @@ class FakeSupabase {
     this.haengen = null; // Pfad-Teil: Anfragen dorthin kommen nie zurueck
     this.offline = false;
     this.log = [];
+    this.dateien = new Map(); // "eimer/pfad" -> { text, typ }
+    this.eimer = new Set(["faellig-kalender"]);
   }
 
   serverAm() {
@@ -77,7 +79,7 @@ class FakeSupabase {
         await pause(2);
         const r = this.antwort(u, init);
         this.log.push(`${init.method || "GET"} ${u.pathname} ${r.status}`);
-        const text = r.body === undefined ? "" : JSON.stringify(r.body);
+        const text = r.body === undefined ? "" : r.roh ? r.body : JSON.stringify(r.body);
         return { status: r.status, ok: r.status >= 200 && r.status < 300, text: async () => text };
       } finally {
         this.laufend--;
@@ -93,9 +95,38 @@ class FakeSupabase {
     return { uid: z.uid };
   }
 
+  // Storage wie bei Supabase: /object/public/... liest jeder, Schreiben und
+  // Loeschen nur im Ordner mit der eigenen Konto-ID (so die Regeln in der Migration).
+  speicherAntwort(u, init, methode) {
+    const offen = u.pathname.match(/^\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (offen && methode === "GET") {
+      const d = this.dateien.get(`${offen[1]}/${offen[2]}`);
+      return d ? { status: 200, body: d.text, roh: true } : { status: 400, body: { error: "not_found" } };
+    }
+    const m = u.pathname.match(/^\/storage\/v1\/object\/([^/]+)\/(.+)$/);
+    if (!m) return null;
+    const wer = this.uidAus(init);
+    if (!wer.uid) return { status: 401, body: { message: "JWT expired" } };
+    const [, eimer, pfad] = m;
+    if (!this.eimer.has(eimer)) return { status: 404, body: { statusCode: "404", error: "Bucket not found", message: "Bucket not found" } };
+    if (pfad.split("/")[0] !== wer.uid) return { status: 403, body: { message: "new row violates row-level security policy" } };
+    const k = `${eimer}/${pfad}`;
+    if (methode === "POST") {
+      if (this.dateien.has(k) && init.headers["x-upsert"] !== "true") return { status: 400, body: { error: "Duplicate" } };
+      this.dateien.set(k, { text: init.body, typ: init.headers["Content-Type"] });
+      return { status: 200, body: { Key: k } };
+    }
+    if (methode === "DELETE") {
+      this.dateien.delete(k);
+      return { status: 200, body: { message: "Successfully deleted" } };
+    }
+    return { status: 405, body: {} };
+  }
+
   antwort(u, init) {
-    const koerper = init.body ? JSON.parse(init.body) : null;
     const methode = init.method || "GET";
+    if (u.pathname.startsWith("/storage/")) return this.speicherAntwort(u, init, methode);
+    const koerper = init.body ? JSON.parse(init.body) : null;
 
     if (u.pathname === "/auth/v1/token" && u.searchParams.get("grant_type") === "refresh_token") {
       const uid = this.erneuerer.get(koerper.refresh_token);
@@ -655,4 +686,140 @@ test("Lange nicht abgeglichen: im Konto aufgeraeumtes Loeschen kommt nicht zurue
   b.schliessen();
   assert.equal(server.daten("u1", "notizen", "w1"), undefined, "darf nicht wieder hochgeladen werden");
   assert.equal(server.daten("u1", "notizen", "w3")?.daten.text, "neu auf B");
+});
+
+/* ---------------- Kalender-Abo ---------------- */
+
+const frist = (id, text, dueKey) => ({
+  id, text, subject: null, dueKey, isFixed: true, repeat: null, amountCents: null, kuend: null,
+  bereich: null, done: false, createdAt: 1_700_000_000_000,
+});
+
+function aufgabenAendern(g, fn) {
+  const liste = JSON.parse(g.speicher[AUFGABEN_KEY] || "[]");
+  g.speicher[AUFGABEN_KEY] = JSON.stringify(fn(liste) || liste);
+}
+
+function aboUrl(g) { return g.win.document.getElementById("kalAboUrl").value; }
+
+async function aboAbrufen(server, url) {
+  const r = await server.fetchFuer()(url, {});
+  return { status: r.status, text: await r.text() };
+}
+
+const uploads = (server) => server.log.filter((l) => /^POST \/storage\//.test(l)).length;
+
+test("Kalender-Abo: Link erstellen, Datei liegt oeffentlich, anderes Geraet zeigt denselben Link", async () => {
+  const { server, a, b } = await zweiGeraete();
+  aufgabenAendern(a, (l) => [frist("f1", "Steuererklaerung abgeben", "2027-07-31"), ...l]);
+  await a.oeffnen();
+  const d = a.win.document;
+  assert.equal(d.getElementById("kalAboStart").hidden, false, "Knopf muss angemeldet sichtbar sein");
+  d.getElementById("kalAboAn").click();
+  await a.ruhig();
+
+  const url = aboUrl(a);
+  assert.match(url, /^https:\/\/xrrcuapiugwgqxxatkiq\.supabase\.co\/storage\/v1\/object\/public\/faellig-kalender\/u1\/[0-9a-f]{32}\.ics$/);
+  const r = await aboAbrufen(server, url);
+  assert.equal(r.status, 200);
+  assert.match(r.text, /BEGIN:VCALENDAR/);
+  assert.match(r.text, /SUMMARY:Steuererklaerung abgeben/);
+  assert.match(r.text, /DTSTART;VALUE=DATE:20270731/);
+  assert.match(r.text, /REFRESH-INTERVAL;VALUE=DURATION:PT1H/);
+  assert.match(server.dateien.get(url.split("/public/")[1]).typ, /^text\/calendar/);
+  assert.match(d.getElementById("kalAboGoogle").href, /^https:\/\/calendar\.google\.com\/calendar\/r\?cid=webcal%3A%2F%2F/);
+  assert.match(d.getElementById("kalAboMsg").textContent, /Aktuell/);
+  a.schliessen();
+
+  await b.oeffnen();
+  assert.equal(aboUrl(b), url, "beide Geraete muessen denselben Link haben");
+  b.schliessen();
+});
+
+test("Kalender-Abo: Aenderung auf dem anderen Geraet landet in der Datei, ohne Aenderung kein Hochladen", async () => {
+  const { server, a, b } = await zweiGeraete();
+  aufgabenAendern(a, (l) => [frist("f1", "TUeV", "2027-03-01"), ...l]);
+  await a.oeffnen();
+  a.win.document.getElementById("kalAboAn").click();
+  await a.ruhig();
+  const url = aboUrl(a);
+  a.schliessen();
+
+  aufgabenAendern(b, (l) => [frist("f2", "Kfz-Steuer", "2027-04-15"), ...l]);
+  await b.oeffnen();
+  b.schliessen();
+  let r = await aboAbrufen(server, url);
+  assert.match(r.text, /SUMMARY:TUeV/);
+  assert.match(r.text, /SUMMARY:Kfz-Steuer/);
+
+  const vorher = uploads(server);
+  await b.oeffnen();
+  await b.syncen();
+  b.schliessen();
+  assert.equal(uploads(server), vorher, "gleicher Inhalt darf nicht erneut hochgeladen werden");
+
+  aufgabenAendern(a, (l) => l.map((i) => (i.id === "f1" ? { ...i, done: true } : i)));
+  await a.oeffnen();
+  a.schliessen();
+  r = await aboAbrufen(server, url);
+  assert.doesNotMatch(r.text, /SUMMARY:TUeV/, "Erledigtes muss aus dem Abo verschwinden");
+});
+
+test("Kalender-Abo: neuer Link loescht den alten, Abo beenden loescht die Datei auf allen Geraeten", async () => {
+  const { server, a, b } = await zweiGeraete();
+  aufgabenAendern(a, (l) => [frist("f1", "Miete", "2027-01-01"), ...l]);
+  await a.oeffnen();
+  a.win.document.getElementById("kalAboAn").click();
+  await a.ruhig();
+  const alt = aboUrl(a);
+  a.win.document.getElementById("kalAboNeu").click();
+  await a.ruhig();
+  const neu = aboUrl(a);
+  assert.notEqual(neu, alt);
+  assert.equal((await aboAbrufen(server, alt)).status, 400, "alter Link muss tot sein");
+  assert.equal((await aboAbrufen(server, neu)).status, 200);
+  a.schliessen();
+
+  await b.oeffnen();
+  assert.equal(aboUrl(b), neu);
+  b.win.document.getElementById("kalAboEnde").click();
+  await b.ruhig();
+  assert.equal(b.win.document.getElementById("kalAboDa").hidden, true);
+  assert.equal((await aboAbrufen(server, neu)).status, 400, "beendetes Abo muss offline sein");
+  b.schliessen();
+
+  await a.oeffnen();
+  assert.equal(a.win.document.getElementById("kalAboDa").hidden, true, "auch das andere Geraet zeigt kein Abo mehr");
+  assert.equal(a.win.document.getElementById("kalAboStart").hidden, false);
+  a.schliessen();
+  assert.equal(server.dateien.size, 0);
+});
+
+test("Kalender-Abo: fehlt der Speicherordner, gibt es eine sichtbare Meldung und der Sync bleibt heil", async () => {
+  const { server, a } = await zweiGeraete();
+  server.eimer.clear();
+  await a.oeffnen();
+  a.win.document.getElementById("kalAboAn").click();
+  await a.ruhig();
+  assert.equal(a.kopfText(), "Synchron");
+  const msg = a.win.document.getElementById("kalAboMsg");
+  assert.match(msg.textContent, /konnte nicht aktualisiert werden/);
+  assert.equal(msg.getAttribute("data-ok"), "false");
+
+  server.eimer.add("faellig-kalender");
+  await a.syncen();
+  assert.equal((await aboAbrufen(server, aboUrl(a))).status, 200, "beim naechsten Sync klappt es");
+  assert.match(msg.textContent, /Aktuell/);
+  a.schliessen();
+});
+
+test("Kalender-Abo: abgemeldet kein Knopf, kein Hochladen", async () => {
+  const server = new FakeSupabase();
+  const a = new Geraet("Handy", server);
+  await a.oeffnen();
+  const d = a.win.document;
+  assert.equal(d.getElementById("kalAboStart").hidden, true);
+  assert.equal(d.getElementById("kalAboDa").hidden, true);
+  assert.equal(uploads(server), 0);
+  a.schliessen();
 });
