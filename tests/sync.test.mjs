@@ -200,6 +200,34 @@ class FakeSupabase {
       return { status: 200, body: { termine: this.googleTermine || [], am: Date.now() } };
     }
 
+    if (u.pathname === "/rest/v1/rpc/faellig_push_plan_setzen" && methode === "POST") {
+      assert.ok(Array.isArray(koerper.plan) && koerper.plan.length <= 120);
+      this.pushPlaene = this.pushPlaene || new Map();
+      this.pushPlaene.set(uid, koerper.plan);
+      this.pushPlanUploads = (this.pushPlanUploads || 0) + 1;
+      return { status: 200, body: koerper.plan.length };
+    }
+    if (u.pathname === "/rest/v1/rpc/faellig_push_anmelden" && methode === "POST") {
+      assert.match(koerper.adresse, /^https:\/\//);
+      assert.ok(koerper.schluessel && koerper.geheim);
+      this.pushAbos = this.pushAbos || new Map();
+      this.pushAbos.set(koerper.adresse, { uid, zone: koerper.zone, name: koerper.name });
+      return { status: 204 };
+    }
+    if (u.pathname === "/rest/v1/faellig_push_abo" && methode === "DELETE") {
+      const ep = (u.searchParams.get("endpoint") || "").replace(/^eq\./, "");
+      const a = this.pushAbos && this.pushAbos.get(ep);
+      if (a && a.uid === uid) this.pushAbos.delete(ep);
+      return { status: 204 };
+    }
+    if (u.pathname === "/functions/v1/faellig-push" && methode === "POST") {
+      this.pushTests = this.pushTests || [];
+      this.pushTests.push(koerper);
+      const a = this.pushAbos && this.pushAbos.get(koerper.endpoint);
+      if (!a || a.uid !== uid) return { status: 404, body: { error: "Dieses Gerät ist noch nicht angemeldet." } };
+      return { status: 200, body: { ok: true } };
+    }
+
     return { status: 404, body: { message: "unbekannt " + u.pathname } };
   }
 }
@@ -211,8 +239,11 @@ const offeneFenster = new Set();
 afterEach(() => { for (const w of offeneFenster) w.close(); offeneFenster.clear(); });
 
 class Geraet {
-  constructor(name, server, { uhrVersatzMs = 0 } = {}) {
+  constructor(name, server, { uhrVersatzMs = 0, push = null } = {}) {
     this.name = name;
+    // push: { erlaubnis: "default" | "granted" | "denied", antwort: was requestPermission liefert }
+    this.push = push;
+    this.pushAbo = null; // Abo beim Browser, ueberlebt das Schliessen
     this.server = server;
     this.uhrVersatzMs = uhrVersatzMs;
     this.speicher = {}; // ueberlebt das Schliessen der App
@@ -246,6 +277,7 @@ class Geraet {
         win.alert = () => {};
         win.scrollTo = () => {};
         win.HTMLElement.prototype.scrollIntoView = function () {};
+        if (geraet.push) pushNachbauen(win, geraet);
         if (!win.matchMedia) {
           win.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {},
             addEventListener() {}, removeEventListener() {} });
@@ -327,6 +359,37 @@ class Geraet {
     const liste = JSON.parse(this.speicher[NOTIZEN_KEY] || "[]");
     this.speicher[NOTIZEN_KEY] = JSON.stringify(fn(liste) || liste);
   }
+}
+
+// Push wie in Chrome auf Android: Notification, Service Worker, PushManager.
+function pushNachbauen(win, geraet) {
+  const p = geraet.push;
+  win.Notification = function () {};
+  Object.defineProperty(win.Notification, "permission", { get: () => p.erlaubnis });
+  win.Notification.requestPermission = async () => { p.erlaubnis = p.antwort || "granted"; return p.erlaubnis; };
+  win.PushManager = function () {};
+  const pushManager = {
+    getSubscription: async () => geraet.pushAbo,
+    subscribe: async (opt) => {
+      assert.equal(opt.userVisibleOnly, true);
+      assert.equal(opt.applicationServerKey.length, 65, "oeffentlicher VAPID-Schluessel muss 65 Bytes haben");
+      const ep = "https://fcm.googleapis.com/fcm/send/" + geraet.name + "-" + Math.random().toString(36).slice(2);
+      geraet.pushAbo = {
+        endpoint: ep,
+        toJSON: () => ({ endpoint: ep, keys: { p256dh: "BPub" + geraet.name, auth: "auth" + geraet.name } }),
+        unsubscribe: async () => { geraet.pushAbo = null; return true; },
+      };
+      return geraet.pushAbo;
+    },
+  };
+  Object.defineProperty(win.navigator, "serviceWorker", {
+    value: {
+      ready: Promise.resolve({ pushManager }),
+      register: async () => ({ pushManager }),
+      addEventListener() {},
+      controller: null,
+    },
+  });
 }
 
 async function zweiGeraete(opts = {}) {
@@ -961,5 +1024,175 @@ test("Google-Termine: abgemeldet kein Abruf", async () => {
   await a.oeffnen();
   assert.equal(a.win.document.getElementById("gTerminStart").hidden, true);
   assert.equal(server.googleAbrufe || 0, 0);
+  a.schliessen();
+});
+
+
+/* ---------------- Erinnerungen aufs Handy ---------------- */
+
+const ERI_MERK_KEY = "faellig-erinnerung-v1";
+
+function einstAendern(g, fn) {
+  const e = JSON.parse(g.speicher[EINST_KEY] || "{}");
+  g.speicher[EINST_KEY] = JSON.stringify(fn(e) || e);
+}
+
+function plan(server, uid = "u1") { return (server.pushPlaene && server.pushPlaene.get(uid)) || null; }
+function planTag(server, tagePlus) { return (plan(server) || []).find((p) => p.tag === tagKey(tagePlus)); }
+
+async function schalten(g, an) {
+  const el = g.win.document.getElementById("eriAn");
+  el.checked = an;
+  el.dispatchEvent(new g.win.Event("change"));
+  await g.ruhig();
+}
+
+function eriStatus(g) { return g.win.document.getElementById("eriStatus").textContent; }
+
+test("Erinnerungen: Plan mit Ueberfaelligem, heute, morgen, Wiederholung und Kuendigungsfrist", async () => {
+  const { server, a } = await zweiGeraete();
+  aufgabenAendern(a, () => [
+    frist("f-alt", "Steuer", tagKey(-3)),
+    frist("f-heute", "Miete", tagKey(0)),
+    frist("f-morgen", "TÜV", tagKey(1)),
+    { ...frist("f-muell", "Müll raus", tagKey(0)), isFixed: false, repeat: { unit: "week", n: 1 } },
+    { ...frist("f-weg", "Erledigt", tagKey(0)), done: true },
+    { ...frist("abo-fit", "Fitness", tagKey(5)), amountCents: 3000, repeat: { unit: "month", n: 1 },
+      kuend: { n: 14, unit: "day", endeKey: tagKey(44) } },
+  ]);
+  einstAendern(a, (e) => ({ ...e, erinnerung: { uhrzeit: "06:45", heute: true, morgen: true, termine: false, kuend: true } }));
+  await a.oeffnen();
+
+  const heute = planTag(server, 0);
+  assert.ok(heute, "heute muss im Plan stehen");
+  assert.equal(heute.uhrzeit, "06:45");
+  const tag = heute.meldungen[0];
+  assert.equal(tag.titel, "Fällig: 1 überfällig · 2 heute");
+  assert.equal(tag.text, "Überfällig: Steuer\nHeute: Miete, Müll raus\nMorgen: TÜV");
+  assert.equal(tag.tag, "faellig-tag-" + tagKey(0));
+  // Kuendigungsfrist: letzter Tag in 30 Tagen -> eigene Meldung heute
+  const kuend = heute.meldungen[1];
+  assert.equal(kuend.titel, "Kündigen: Fitness");
+  assert.match(kuend.text, /^Noch 30 Tage: bis .+ muss die Kündigung raus\. Vertrag läuft bis /);
+
+  // In einer Woche: Muell ist wieder "heute", Steuer weiter ueberfaellig
+  const woche = planTag(server, 7);
+  assert.match(woche.meldungen[0].text, /Überfällig: Steuer, Miete, TÜV\nHeute: Müll raus/);
+  // 7 Tage vor der Kuendigungsfrist und am letzten Tag
+  assert.ok(planTag(server, 23).meldungen.some((m) => /^Noch 7 Tage/.test(m.text)));
+  assert.match(planTag(server, 30).meldungen[0].text, /Heute: .*Fitness kündigen \(letzter Tag\)/);
+  assert.match(planTag(server, 29).meldungen[0].text, /Morgen: Fitness kündigen \(letzter Tag\)/);
+  assert.equal(plan(server).length, 60, "jeden Tag steht etwas an (Steuer bleibt ueberfaellig)");
+
+  // Ohne Aenderung kein neues Hochladen
+  const n = server.pushPlanUploads;
+  await a.syncen();
+  assert.equal(server.pushPlanUploads, n);
+
+  // Steuer erledigt -> neuer Plan
+  a.win.document.querySelector("[data-act='done'][data-id='f-alt']").click();
+  await a.ruhig();
+  assert.ok(server.pushPlanUploads > n);
+  assert.doesNotMatch(planTag(server, 0).meldungen[0].text, /Steuer/);
+  a.schliessen();
+});
+
+test("Erinnerungen: leere Tage fehlen, Haekchen wirken, Termine nur wenn gewollt", async () => {
+  const { server, a } = await zweiGeraete();
+  server.googleTermine = [zeitTermin("g1", "Zahnarzt", 2, 10)];
+  aufgabenAendern(a, () => [frist("f1", "Miete", tagKey(3))]);
+  einstAendern(a, (e) => ({ ...e, googleIcal: G_URL, erinnerung: { uhrzeit: "07:30", heute: true, morgen: false, termine: true, kuend: true } }));
+  await a.oeffnen();
+  await a.ruhig();
+  assert.deepEqual(plan(server).slice(0, 2).map((p) => p.tag), [tagKey(2), tagKey(3)], "heute und morgen: nichts, also fehlen sie");
+  assert.equal(planTag(server, 4).meldungen[0].text, "Überfällig: Miete", "bleibt bis zum Abhaken ueberfaellig");
+  assert.equal(planTag(server, 2).meldungen[0].titel, "Fällig: 1 Termin");
+  assert.equal(planTag(server, 2).meldungen[0].text, "Termine: 10:00 Zahnarzt");
+  assert.equal(planTag(server, 3).meldungen[0].text, "Heute: Miete");
+
+  const d = a.win.document;
+  d.getElementById("eriTermine").checked = false;
+  d.getElementById("eriTermine").dispatchEvent(new a.win.Event("change"));
+  d.getElementById("eriMorgen").checked = true;
+  d.getElementById("eriMorgen").dispatchEvent(new a.win.Event("change"));
+  await a.ruhig();
+  assert.equal(plan(server)[0].tag, tagKey(2));
+  assert.equal(planTag(server, 2).meldungen[0].text, "Morgen: Miete");
+  assert.equal(planTag(server, 2).meldungen[0].titel, "Fällig: 1 morgen");
+  a.schliessen();
+});
+
+test("Erinnerungen: ohne Einschalten keine Anfragen ans Konto", async () => {
+  const { server, a } = await zweiGeraete();
+  aufgabenAendern(a, () => [frist("f1", "Miete", tagKey(0))]);
+  await a.oeffnen();
+  assert.ok(!server.log.some((l) => /push/.test(l)), server.log.join("\n"));
+  a.schliessen();
+});
+
+test("Erinnerungen: einschalten, Test schicken, Einstellung kommt aufs andere Geraet, ausschalten", async () => {
+  const server = new FakeSupabase();
+  const a = new Geraet("Handy", server, { push: { erlaubnis: "default", antwort: "granted" } });
+  const b = new Geraet("Laptop", server);
+  await a.oeffnen({ sitzung: server.sitzung("u1", "k@test") });
+  await b.oeffnen({ sitzung: server.sitzung("u1", "k@test") });
+  b.schliessen();
+
+  await schalten(a, true);
+  assert.equal(a.win.document.getElementById("eriAn").checked, true);
+  const abos = [...server.pushAbos.entries()];
+  assert.equal(abos.length, 1);
+  assert.equal(abos[0][1].uid, "u1");
+  assert.ok(abos[0][1].zone, "Zeitzone des Geraets geht mit");
+  assert.ok(plan(server), "Plan wird gleich hochgeladen");
+  assert.match(eriStatus(a), /steht nichts an|Nächste Erinnerung/);
+
+  a.win.document.getElementById("eriTest").click();
+  await a.ruhig();
+  assert.equal(server.pushTests.length, 1);
+  assert.equal(server.pushTests[0].endpoint, abos[0][0]);
+  assert.match(eriStatus(a), /Geschickt/);
+  a.schliessen();
+
+  // Laptop: hat keinen Schalter an, rechnet aber den Plan mit, wenn dort etwas dazukommt
+  aufgabenAendern(b, (l) => [frist("f-laptop", "Rechnung", tagKey(1)), ...l]);
+  await b.oeffnen();
+  assert.equal(b.win.document.getElementById("eriAn").checked, false);
+  assert.equal(planTag(server, 1).meldungen[0].text, "Heute: Rechnung");
+  const z = b.win.document.getElementById("eriZeit");
+  z.value = "08:15";
+  z.dispatchEvent(new b.win.Event("change"));
+  await b.ruhig();
+  assert.equal(plan(server)[0].uhrzeit, "08:15");
+  b.schliessen();
+
+  await a.oeffnen();
+  assert.equal(a.win.document.getElementById("eriZeit").value, "08:15", "Uhrzeit gilt fuers Konto");
+  assert.equal(a.win.document.getElementById("eriAn").checked, true, "Schalter bleibt je Geraet");
+  await schalten(a, false);
+  assert.equal(server.pushAbos.size, 0);
+  assert.equal(a.pushAbo, null);
+  assert.match(eriStatus(a), /aus/);
+  a.schliessen();
+});
+
+test("Erinnerungen: Benachrichtigungen verboten -> klare Meldung, bleibt aus", async () => {
+  const server = new FakeSupabase();
+  const a = new Geraet("Handy", server, { push: { erlaubnis: "default", antwort: "denied" } });
+  await a.oeffnen({ sitzung: server.sitzung("u1", "k@test") });
+  await schalten(a, true);
+  assert.equal(a.win.document.getElementById("eriAn").checked, false);
+  assert.match(eriStatus(a), /blockiert/);
+  assert.equal(server.pushAbos, undefined);
+  a.schliessen();
+});
+
+test("Erinnerungen: Browser ohne Push zeigt Hinweis statt Schalter", async () => {
+  const server = new FakeSupabase();
+  const a = new Geraet("Alt", server);
+  await a.oeffnen({ sitzung: server.sitzung("u1", "k@test") });
+  // jsdom kennt kein PushManager
+  assert.equal(a.win.document.getElementById("eriDa").hidden, true);
+  assert.equal(a.win.document.getElementById("eriGehtNicht").hidden, false);
   a.schliessen();
 });
