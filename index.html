@@ -1264,6 +1264,12 @@
 
   .backup__sel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+  /* Erinnerungen: groessere Ziele fuer den Daumen, Schalter hervorgehoben */
+  #eriDa { display: flex; flex-direction: column; gap: 10px; }
+  #eriDa .backup__check { min-height: 32px; }
+  .eri__schalter { font-weight: 700; color: var(--ink); }
+  .eri__schalter input[type="checkbox"] { width: 20px; height: 20px; }
+
   /* ---------- Notizen ---------- */
 
   .noteadd { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -1682,6 +1688,57 @@
     </div>
   </details>
 
+  <details class="backup" id="erinnerung">
+    <summary>Erinnerungen aufs Handy</summary>
+    <div class="backup__body">
+      <div class="backup__block">
+        <span class="backup__title">Einmal am Tag, was ansteht</span>
+        <span class="backup__hint" id="eriAus">
+          Fällig schickt dir jeden Morgen eine Meldung mit Überfälligem und dem, was heute fällig ist,
+          auch wenn die App zu ist. Braucht die Anmeldung unter &bdquo;Sync zwischen Ger&auml;ten&ldquo;.
+        </span>
+        <span class="backup__hint" id="eriGehtNicht" hidden>
+          Dieser Browser kann keine Push-Meldungen. Auf dem Handy: Fällig in Chrome öffnen und
+          &bdquo;Zum Startbildschirm hinzuf&uuml;gen&ldquo;, dann von dort starten.
+        </span>
+        <div id="eriDa" hidden>
+          <label class="backup__check eri__schalter">
+            <input type="checkbox" id="eriAn" />
+            <span>Auf diesem Gerät erinnern</span>
+          </label>
+          <label class="backup__check">
+            <span>Uhrzeit:</span>
+            <input type="time" id="eriZeit" class="backup__sel" step="300" value="07:30" />
+          </label>
+          <label class="backup__check">
+            <input type="checkbox" id="eriHeute" />
+            <span>Überfälliges und heute</span>
+          </label>
+          <label class="backup__check">
+            <input type="checkbox" id="eriMorgen" />
+            <span>Morgen schon mit ankündigen</span>
+          </label>
+          <label class="backup__check">
+            <input type="checkbox" id="eriTermine" />
+            <span>Google-Termine von heute</span>
+          </label>
+          <label class="backup__check">
+            <input type="checkbox" id="eriKuend" />
+            <span>Kündigungsfristen 30 und 7 Tage vorher (eigene Meldung)</span>
+          </label>
+          <div class="backup__row">
+            <button class="btn" id="eriTest" type="button">Test schicken</button>
+          </div>
+          <span class="backup__hint">
+            Uhrzeit und Häkchen gelten für alle deine Geräte, der Schalter nur für dieses.
+            Zeitzone ist die des Geräts. Steht an einem Tag nichts an, kommt keine Meldung.
+          </span>
+        </div>
+        <span class="backup__msg" id="eriStatus" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </details>
+
   <details class="backup" id="kalender">
     <summary>Fristen in den Kalender</summary>
     <div class="backup__body">
@@ -1805,7 +1862,7 @@
 
   // Wird bei jeder Veroeffentlichung hochgezaehlt. Steht unten in der
   // Fusszeile, damit man eine haengengebliebene alte Fassung sofort erkennt.
-  var FASSUNG = "25.11.2026 Google-Termine";
+  var FASSUNG = "26.11.2026 Erinnerungen";
 
   var STORAGE_KEY = "faellig-aufgaben-v1";
   var SETTINGS_KEY = "faellig-einstellungen-v1";
@@ -2289,16 +2346,18 @@
 
   // Letzter Tag, an dem die Kuendigung raus sein muss. Ohne Vertragsende gibt
   // es keine Frist — dann sagt die Kuendigungsfrist nur, wie lange es dauert.
-  function kuendFrist(item) {
+  // heute: fuer den Erinnerungsplan auch ein Tag in der Zukunft.
+  function kuendFrist(item, heute) {
     var k = item.kuend;
     if (!k || !k.endeKey) return null;
+    heute = heute || today();
     var anker = fromKey(k.endeKey).getDate();
     var ende = fromKey(k.endeKey);
     var bis = zeitPlus(ende, -(k.n || 0), k.unit || "day", anker);
     // Ist die Frist durch und der Vertrag verlaengert sich automatisch, dann
     // zaehlt der naechste Durchgang — sonst stuende hier ewig ein totes Datum.
     var guard = 0;
-    while (bis < today() && k.verl && guard < 200) {
+    while (bis < heute && k.verl && guard < 200) {
       ende = zeitPlus(ende, k.verl.n, k.verl.unit, anker);
       bis = zeitPlus(ende, -(k.n || 0), k.unit || "day", anker);
       guard++;
@@ -6154,7 +6213,7 @@
         syncLauf = null;
         syncAnzeigen();
         if (syncNochmal) { syncNochmal = false; syncBald(300); }
-        else if (syncZustand === "ruhe") { kalAboAktualisieren(); googleHolen(false); }
+        else if (syncZustand === "ruhe") { kalAboAktualisieren(); googleHolen(false); eriNachSync(); }
       });
     return syncLauf;
   }
@@ -6475,6 +6534,7 @@
       gLauf = null;
       gAnzeigen();
       if (!wirdGeradeBearbeitet()) render();
+      if (eriEinst().termine) eriPlanHochladen();
     });
     gAnzeigen();
     return gLauf;
@@ -6532,6 +6592,426 @@
     syncBald(0);
   });
 
+  /* ---------- Erinnerungen aufs Handy ---------- */
+  // Die App rechnet nach jedem Sync aus, was an den naechsten Tagen gemeldet
+  // wird, und legt diesen Plan ins Konto (faellig_push_plan). Jedes Geraet mit
+  // eingeschaltetem Schalter hat ein Push-Abo (faellig_push_abo). Alle 15
+  // Minuten schaut die Edge Function faellig-push nach, wo die Uhrzeit erreicht
+  // ist, und schickt die Meldungen des Tages. Der Service Worker zeigt sie an.
+  //
+  // Der Plan geht davon aus, dass sich bis zum naechsten Sync nichts aendert:
+  // Ueberfaelliges bleibt ueberfaellig, bis es abgehakt ist. Wiederholungen
+  // zaehlen an jedem ihrer Tage als "heute".
+
+  var ERI_VAPID = "BOM19XXCHBbDwYOsc-ijtyuQwI8cYmC1m0CTHn63K9Tk1yqurvxO6iFaNED0fFe8ouBbLBfX-yIGpXI3kP7Qx_M";
+  var ERI_TAGE = 60;
+  var ERI_MERK_KEY = "faellig-erinnerung-v1"; // je Geraet: { an, endpoint, h }
+  var ERI_STANDARD = { uhrzeit: "07:30", heute: true, morgen: true, termine: false, kuend: true };
+  var ERI_MAX_LISTE = 5;
+
+  function eriEinst() {
+    var e = settings.erinnerung && typeof settings.erinnerung === "object" ? settings.erinnerung : {};
+    var o = {};
+    Object.keys(ERI_STANDARD).forEach(function (k) {
+      o[k] = typeof e[k] === typeof ERI_STANDARD[k] ? e[k] : ERI_STANDARD[k];
+    });
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(o.uhrzeit)) o.uhrzeit = ERI_STANDARD.uhrzeit;
+    return o;
+  }
+
+  function eriMerkLaden() {
+    var o = null;
+    try { o = JSON.parse(localStorage.getItem(ERI_MERK_KEY) || "null"); } catch (e) { o = null; }
+    return o && typeof o === "object" ? o : {};
+  }
+  function eriMerkSpeichern(o) {
+    try { localStorage.setItem(ERI_MERK_KEY, JSON.stringify(o)); } catch (e) {}
+  }
+
+  function eriKurz(s, n) {
+    s = String(s || "").replace(/\s+/g, " ").trim();
+    return s.length > n ? s.slice(0, n - 1).trim() + "…" : s;
+  }
+
+  function eriTitel(i) {
+    return eriKurz((i.subject ? i.subject + ": " : "") + (i.text || ""), 50) || "Ohne Titel";
+  }
+
+  function eriDatum(key) {
+    var d = fromKey(key);
+    return WEEKDAYS_SHORT[d.getDay()] + " " + d.getDate() + ". " + MONTHS_SHORT[d.getMonth()] + " " + d.getFullYear();
+  }
+
+  function eriTageZwischen(a, b) { return Math.round((fromKey(b) - fromKey(a)) / 86400000); }
+
+  // Wo steht ein Eintrag am Tag `tag`? "over", "heute", "morgen" oder null.
+  function eriStand(item, tag, morgen) {
+    var due = item.dueKey;
+    if (!item.repeat) {
+      if (due < tag) return "over";
+      if (due === tag) return "heute";
+      if (due === morgen) return "morgen";
+      return null;
+    }
+    var rep = item.repeat, n = rep.n || 1;
+    var d = fromKey(due), anker = rep.tag || d.getDate();
+    var istHeute = false, istMorgen = false, guard = 0, k = due;
+    while (k <= morgen && guard < 800) {
+      if (k === tag) istHeute = true;
+      if (k === morgen) istMorgen = true;
+      if (rep.unit === "day") d = addDays(d, n);
+      else if (rep.unit === "week") d = addDays(d, 7 * n);
+      else if (rep.unit === "month") d = addMonthsAnchored(d, n, anker);
+      else d = addYearsAnchored(d, n, anker);
+      k = toKey(d);
+      guard++;
+    }
+    if (istHeute) return "heute";
+    if (due < tag) return "over";
+    if (istMorgen) return "morgen";
+    return null;
+  }
+
+  function eriListe(namen) {
+    if (namen.length <= ERI_MAX_LISTE) return namen.join(", ");
+    return namen.slice(0, ERI_MAX_LISTE).join(", ") + " und " + (namen.length - ERI_MAX_LISTE) + " weitere";
+  }
+
+  // Google-Termine eines Tages aus dem, was dieses Geraet zuletzt geholt hat.
+  function eriTermine(tag) {
+    var m = gMerkLaden();
+    if (!m) return [];
+    var raus = [];
+    m.termine.forEach(function (t) {
+      if (!t || typeof t.start !== "string" || typeof t.ende !== "string") return;
+      if (t.ganztag) {
+        if (t.start <= tag && tag < t.ende) raus.push({ s: "", txt: "ganztägig " + eriKurz(t.titel || "(ohne Titel)", 40) });
+        return;
+      }
+      var s = new Date(t.start);
+      if (isNaN(s) || toKey(s) !== tag) return;
+      raus.push({ s: uhrzeit(s), txt: uhrzeit(s) + " " + eriKurz(t.titel || "(ohne Titel)", 40) });
+    });
+    raus.sort(function (a, b) { return a.s < b.s ? -1 : a.s > b.s ? 1 : 0; });
+    return raus.map(function (x) { return x.txt; });
+  }
+
+  // Der ganze Plan: [{ tag, uhrzeit, meldungen: [{ titel, text, tag }] }],
+  // nur Tage, an denen etwas zu melden ist.
+  function eriPlan(abHeute) {
+    var o = eriEinst();
+    var start = abHeute || today();
+    var offen = items.filter(function (i) { return !i.done; });
+    var fristen = offen.filter(function (i) { return bereichVon(i) === "fristen" && i.dueKey; });
+    var vertraege = offen.filter(function (i) { return bereichVon(i) === "abos" && i.kuend && i.kuend.endeKey; });
+    var plan = [];
+
+    for (var t = 0; t < ERI_TAGE; t++) {
+      var tagD = addDays(start, t);
+      var tag = toKey(tagD), morgen = toKey(addDays(tagD, 1));
+      var ueber = [], heute = [], morgens = [], meldungen = [];
+
+      fristen.forEach(function (i) {
+        var st = eriStand(i, tag, morgen);
+        if (st === "over") ueber.push(i); else if (st === "heute") heute.push(i); else if (st === "morgen") morgens.push(i);
+      });
+      // Aelteste zuerst, damit oben steht, was am laengsten liegt.
+      ueber.sort(function (a, b) { return a.dueKey < b.dueKey ? -1 : a.dueKey > b.dueKey ? 1 : 0; });
+      var namen = { over: ueber.map(eriTitel), heute: heute.map(eriTitel), morgen: morgens.map(eriTitel) };
+
+      vertraege.forEach(function (i) {
+        var kf = kuendFrist(i, tagD);
+        if (!kf) return;
+        var wer = eriTitel(i) + " kündigen";
+        if (kf.bisKey < tag) namen.over.push(wer);
+        else if (kf.bisKey === tag) namen.heute.push(wer + " (letzter Tag)");
+        else if (kf.bisKey === morgen) namen.morgen.push(wer + " (letzter Tag)");
+        var rest = eriTageZwischen(tag, kf.bisKey);
+        if (o.kuend && (rest === 30 || rest === 7)) {
+          meldungen.push({
+            titel: "Kündigen: " + eriTitel(i),
+            text: "Noch " + rest + " Tage: bis " + eriDatum(kf.bisKey) + " muss die Kündigung raus. Vertrag läuft bis " +
+              eriDatum(kf.endeKey) + ".",
+            tag: "faellig-kuend-" + i.id + "-" + kf.bisKey + "-" + rest,
+          });
+        }
+      });
+
+      var zeilen = [], kopf = [];
+      if (o.heute && namen.over.length) {
+        zeilen.push("Überfällig: " + eriListe(namen.over));
+        kopf.push(namen.over.length + " überfällig");
+      }
+      if (o.heute && namen.heute.length) {
+        zeilen.push("Heute: " + eriListe(namen.heute));
+        kopf.push(namen.heute.length + " heute");
+      }
+      if (o.morgen && namen.morgen.length) {
+        zeilen.push("Morgen: " + eriListe(namen.morgen));
+        if (!kopf.length) kopf.push(namen.morgen.length + " morgen");
+      }
+      var termine = o.termine ? eriTermine(tag) : [];
+      if (termine.length) {
+        zeilen.push("Termine: " + eriListe(termine));
+        if (!kopf.length) kopf.push(termine.length === 1 ? "1 Termin" : termine.length + " Termine");
+      }
+      if (zeilen.length) {
+        meldungen.unshift({ titel: "Fällig: " + kopf.join(" · "), text: zeilen.join("\n"), tag: "faellig-tag-" + tag });
+      }
+      if (meldungen.length) plan.push({ tag: tag, uhrzeit: o.uhrzeit, meldungen: meldungen.slice(0, 12) });
+    }
+    return plan;
+  }
+
+  var eriFehler = "";
+  var eriLauf = null;
+  var eriNochmal = false;
+  var eriGeraetGeprueft = false;
+
+  function eriAngefordert() { return !!(settings.erinnerung && typeof settings.erinnerung === "object"); }
+
+  // Plan ins Konto, wenn er sich seit dem letzten Mal (von diesem Geraet) geaendert hat.
+  function eriPlanHochladen() {
+    if (!meta.konto || !eriAngefordert()) return Promise.resolve();
+    if (eriLauf) { eriNochmal = true; return eriLauf; }
+    if (navigator.onLine === false) return Promise.resolve();
+    var plan = eriPlan();
+    var h = streuwert(meta.konto.uid + "|" + kanonisch(plan));
+    if (eriMerkLaden().h === h && !eriFehler) return Promise.resolve();
+    eriLauf = mitZugang(function (t) {
+      return anfrage("/rest/v1/rpc/faellig_push_plan_setzen", "POST", { plan: plan }, t);
+    }).then(function (r) {
+      if (r.ok) {
+        var m = eriMerkLaden(); m.h = h; m.am = Date.now(); eriMerkSpeichern(m);
+        eriFehler = "";
+      } else {
+        eriFehler = r.status === 404 ? "Der Erinnerungsdienst ist noch nicht eingerichtet." : serverText(r);
+      }
+    }, function (e) {
+      if (e && e.art === "netz") return;
+      eriFehler = (e && e.message) || "unbekannter Fehler";
+    }).then(function () {
+      eriLauf = null;
+      eriAnzeigen();
+      if (eriNochmal) { eriNochmal = false; return eriPlanHochladen(); }
+    });
+    return eriLauf;
+  }
+
+  function eriKann() {
+    return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  }
+
+  function eriBytes(b64) {
+    var s = b64.replace(/-/g, "+").replace(/_/g, "/");
+    var roh = atob(s + "===".slice((s.length + 3) % 4));
+    var out = new Uint8Array(roh.length);
+    for (var i = 0; i < roh.length; i++) out[i] = roh.charCodeAt(i);
+    return out;
+  }
+
+  function eriGeraetName() {
+    var ua = navigator.userAgent || "";
+    if (/Android/i.test(ua)) return "Android";
+    if (/iPhone|iPad/i.test(ua)) return "iPhone/iPad";
+    if (/Windows/i.test(ua)) return "Windows";
+    if (/Mac OS/i.test(ua)) return "Mac";
+    return "Gerät";
+  }
+
+  function eriZone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; }
+  }
+
+  function eriRegistrierung() {
+    return Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise(function (_, nein) {
+        setTimeout(function () { nein(new Error("Der Hintergrunddienst der App startet nicht. Einmal neu laden.")); }, 10000);
+      }),
+    ]);
+  }
+
+  // Abo beim Browser holen (oder anlegen) und im Konto anmelden.
+  function eriGeraetAnmelden(neuErlaubt) {
+    return eriRegistrierung().then(function (reg) {
+      return reg.pushManager.getSubscription().then(function (sub) {
+        if (sub || !neuErlaubt) return sub;
+        return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: eriBytes(ERI_VAPID) });
+      });
+    }).then(function (sub) {
+      if (!sub) return null;
+      var j = typeof sub.toJSON === "function" ? sub.toJSON() : sub;
+      var keys = j.keys || {};
+      return mitZugang(function (t) {
+        return anfrage("/rest/v1/rpc/faellig_push_anmelden", "POST", {
+          adresse: j.endpoint, schluessel: keys.p256dh, geheim: keys.auth, zone: eriZone(), name: eriGeraetName(),
+        }, t);
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.status === 404 ? "Der Erinnerungsdienst ist noch nicht eingerichtet." : serverText(r));
+        return j.endpoint;
+      });
+    });
+  }
+
+  var eriEl = {
+    aus: document.getElementById("eriAus"),
+    gehtNicht: document.getElementById("eriGehtNicht"),
+    da: document.getElementById("eriDa"),
+    an: document.getElementById("eriAn"),
+    zeit: document.getElementById("eriZeit"),
+    heute: document.getElementById("eriHeute"),
+    morgen: document.getElementById("eriMorgen"),
+    termine: document.getElementById("eriTermine"),
+    kuend: document.getElementById("eriKuend"),
+    test: document.getElementById("eriTest"),
+    status: document.getElementById("eriStatus"),
+  };
+  var eriMeldungText = "", eriMeldungOk = null;
+
+  function eriSag(text, ok) { eriMeldungText = text || ""; eriMeldungOk = ok === undefined ? null : ok; eriAnzeigen(); }
+
+  function eriNaechste() {
+    var plan = eriPlan();
+    var o = eriEinst();
+    var heuteKey = toKey(today());
+    var jetzt = uhrzeit(new Date());
+    for (var i = 0; i < plan.length; i++) {
+      var p = plan[i];
+      if (p.tag === heuteKey && jetzt >= o.uhrzeit) continue;
+      var wann = p.tag === heuteKey ? "heute" : p.tag === toKey(addDays(today(), 1)) ? "morgen" : gTagKurz(p.tag);
+      return "Nächste Erinnerung: " + wann + " " + o.uhrzeit + " – " + p.meldungen[0].titel.replace(/^Fällig: /, "");
+    }
+    return "In den nächsten " + ERI_TAGE + " Tagen steht nichts an, also kommt auch keine Meldung.";
+  }
+
+  function eriAnzeigen() {
+    if (!eriEl || !eriEl.da) return;
+    var angemeldet = !!meta.konto;
+    var kann = eriKann();
+    eriEl.aus.hidden = angemeldet && kann;
+    eriEl.gehtNicht.hidden = !angemeldet || kann;
+    eriEl.da.hidden = !angemeldet || !kann;
+    if (eriEl.da.hidden) { meldung(eriEl.status, ""); return; }
+    var o = eriEinst();
+    var an = !!eriMerkLaden().an;
+    eriEl.an.checked = an;
+    eriEl.da.setAttribute("data-an", an ? "true" : "false");
+    if (document.activeElement !== eriEl.zeit) eriEl.zeit.value = o.uhrzeit;
+    eriEl.heute.checked = o.heute;
+    eriEl.morgen.checked = o.morgen;
+    eriEl.termine.checked = o.termine;
+    eriEl.termine.disabled = !gAdresse();
+    eriEl.kuend.checked = o.kuend;
+    eriEl.test.disabled = !an;
+    if (eriMeldungText) meldung(eriEl.status, eriMeldungText, eriMeldungOk);
+    else if (eriFehler) meldung(eriEl.status, "Erinnerungen konnten nicht aktualisiert werden: " + eriFehler, false);
+    else if (!an) meldung(eriEl.status, "Auf diesem Gerät aus.", null);
+    else meldung(eriEl.status, eriNaechste(), true);
+  }
+
+  function eriEinstAendern(k, v) {
+    var e = eriEinst();
+    e[k] = v;
+    settings.erinnerung = e;
+    eriMeldungText = "";
+    saveSettings(settings);
+    eriAnzeigen();
+    eriPlanHochladen();
+    syncBald(300);
+  }
+
+  eriEl.zeit.addEventListener("change", function () {
+    if (/^([01]\d|2[0-3]):[0-5]\d$/.test(eriEl.zeit.value)) eriEinstAendern("uhrzeit", eriEl.zeit.value);
+  });
+  ["heute", "morgen", "termine", "kuend"].forEach(function (k) {
+    eriEl[k].addEventListener("change", function () { eriEinstAendern(k, !!eriEl[k].checked); });
+  });
+
+  eriEl.an.addEventListener("change", function () {
+    var einschalten = eriEl.an.checked;
+    eriEl.an.disabled = true;
+    var schritt;
+    if (einschalten) {
+      eriSag("Wird eingeschaltet …");
+      schritt = Promise.resolve(Notification.permission === "granted" ? "granted" : Notification.requestPermission())
+        .then(function (erlaubt) {
+          if (erlaubt !== "granted") {
+            throw new Error(erlaubt === "denied"
+              ? "Benachrichtigungen sind für Fällig blockiert. Am Handy: Einstellungen → Apps → Fällig → Benachrichtigungen erlauben, dann hier nochmal."
+              : "Ohne Erlaubnis für Benachrichtigungen geht es nicht.");
+          }
+          return eriGeraetAnmelden(true);
+        })
+        .then(function (endpoint) {
+          if (!endpoint) throw new Error("Der Browser hat kein Push-Abo angelegt.");
+          var m = eriMerkLaden(); m.an = true; m.endpoint = endpoint; eriMerkSpeichern(m);
+          eriGeraetGeprueft = true;
+          if (!eriAngefordert()) { settings.erinnerung = eriEinst(); saveSettings(settings); syncBald(300); }
+          eriMeldungText = "";
+          return eriPlanHochladen();
+        });
+    } else {
+      eriSag("Wird ausgeschaltet …");
+      var endpoint = eriMerkLaden().endpoint;
+      schritt = eriRegistrierung().then(function (reg) { return reg.pushManager.getSubscription(); })
+        .then(function (sub) { return sub ? sub.unsubscribe() : null; }, function () { return null; })
+        .then(function () {
+          var m = eriMerkLaden(); m.an = false; delete m.endpoint; eriMerkSpeichern(m);
+          eriMeldungText = "";
+          if (!endpoint) return;
+          return mitZugang(function (t) {
+            return anfrage("/rest/v1/faellig_push_abo?endpoint=eq." + encodeURIComponent(endpoint), "DELETE", undefined, t);
+          }).catch(function () {}); // bleibt es im Konto, raeumt der Server beim naechsten Senden auf (410)
+        });
+    }
+    schritt.then(function () { eriAnzeigen(); }, function (e) {
+      if (einschalten) { var m = eriMerkLaden(); m.an = false; eriMerkSpeichern(m); }
+      eriSag((e && e.message) || "Hat nicht geklappt.", false);
+    }).then(function () { eriEl.an.disabled = false; });
+  });
+
+  eriEl.test.addEventListener("click", function () {
+    var endpoint = eriMerkLaden().endpoint;
+    if (!endpoint) return;
+    eriEl.test.disabled = true;
+    eriSag("Wird geschickt …");
+    mitZugang(function (t) {
+      return anfrage("/functions/v1/faellig-push", "POST", { aktion: "test", endpoint: endpoint }, t);
+    }).then(function (r) {
+      if (r.ok) eriSag("Geschickt. Kommt in ein paar Sekunden.", true);
+      else eriSag(r.status === 404 && !(r.json && r.json.error) ? "Der Erinnerungsdienst ist noch nicht eingerichtet." : serverText(r), false);
+    }, function (e) {
+      eriSag(e && e.art === "netz" ? "Keine Verbindung." : ((e && e.message) || "Hat nicht geklappt."), false);
+    }).then(function () {
+      eriEl.test.disabled = false;
+      setTimeout(function () { if (eriMeldungOk !== false) { eriMeldungText = ""; eriAnzeigen(); } }, 6000);
+    });
+  });
+
+  // Nach jedem Sync: Geraet einmal je Start auffrischen (Zeitzone, verlorenes
+  // Abo), dann den Plan nachziehen.
+  function eriNachSync() {
+    if (!meta.konto) return;
+    var m = eriMerkLaden();
+    if (m.an && !eriGeraetGeprueft && eriKann()) {
+      eriGeraetGeprueft = true;
+      var erlaubt = Notification.permission === "granted";
+      eriGeraetAnmelden(erlaubt).then(function (endpoint) {
+        var mm = eriMerkLaden();
+        if (endpoint) { mm.endpoint = endpoint; }
+        else { mm.an = false; delete mm.endpoint; eriSag("Erinnerungen auf diesem Gerät sind aus, weil Benachrichtigungen nicht mehr erlaubt sind.", false); }
+        eriMerkSpeichern(mm);
+        eriAnzeigen();
+      }, function () { eriGeraetGeprueft = false; });
+    }
+    eriPlanHochladen();
+  }
+
+  document.getElementById("erinnerung").addEventListener("toggle", function () {
+    if (document.getElementById("erinnerung").open) { eriMeldungText = eriMeldungOk === false ? eriMeldungText : ""; eriAnzeigen(); }
+  });
+
   /* ---------- Anzeige ---------- */
 
   var syncKopfEl = document.getElementById("syncKopf");
@@ -6572,6 +7052,7 @@
   function syncAnzeigen() {
     kalAboAnzeigen();
     gAnzeigen();
+    eriAnzeigen();
     var offen = anzahlOffen();
     var angemeldet = !!meta.konto;
 

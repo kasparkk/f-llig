@@ -5,7 +5,7 @@
 // bekommt ein installiertes Handy nie wieder ein Update zu sehen: die alte
 // index.html liegt im Speicher, das Netz wird nie gefragt, und aufgeraeumt wird
 // erst, wenn sich diese Datei hier aendert. Genau das ist einmal passiert.
-var CACHE = "faellig-v6";
+var CACHE = "faellig-v7";
 var ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", function (ev) {
@@ -63,4 +63,30 @@ self.addEventListener("fetch", function (ev) {
       return hit || ausDemNetz;
     })
   );
+});
+
+// Erinnerungen: die Edge Function faellig-push schickt { titel, text, tag }.
+// Gleicher tag ersetzt eine aeltere Meldung statt sie zu stapeln.
+self.addEventListener("push", function (ev) {
+  var d = {};
+  try { d = ev.data ? ev.data.json() : {}; } catch (e) { d = { text: ev.data ? ev.data.text() : "" }; }
+  ev.waitUntil(self.registration.showNotification(d.titel || "Fällig", {
+    body: d.text || "",
+    tag: d.tag || "faellig",
+    icon: "icon-192.png",
+    lang: "de",
+    data: { url: "./" },
+  }));
+});
+
+// Tippen holt die offene App nach vorn oder startet sie.
+self.addEventListener("notificationclick", function (ev) {
+  ev.notification.close();
+  var ziel = new URL((ev.notification.data && ev.notification.data.url) || "./", self.registration.scope).href;
+  ev.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (fenster) {
+    for (var i = 0; i < fenster.length; i++) {
+      if (fenster[i].url.indexOf(self.registration.scope) === 0 && "focus" in fenster[i]) return fenster[i].focus();
+    }
+    return self.clients.openWindow ? self.clients.openWindow(ziel) : null;
+  }));
 });
